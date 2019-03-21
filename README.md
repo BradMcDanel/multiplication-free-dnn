@@ -1,4 +1,4 @@
-# Training Multiplication-free DNNs with Power of Two Weights
+# Training Multiplication-free Systolic Arrays for DNNs with Power of Two Weights
 
 ## Training Phase
 Training can be performed in up to 2 stages. However, we can omit the first stage if we are confident in the parameters for pruning (and do not wish to start from pretrained model). Both training scripts `train.py` and `train_prune.py` can be used with a pretrained model (using the `--load-path` flag) or start training a new model if `--load-path` is omitted. In the case of a new model, several parameters control the width/depth of the model and activation quantization. For pruning, the groups parameter determines how much a layer is pruned. If groups=8, then the layer will be reduced by a factor of 8.

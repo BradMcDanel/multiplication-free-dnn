@@ -1,0 +1,30 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  \
+j_mac.v \
+fullAdder.v \
+j_MX_cell.v \
+j_systolic_array.v \
+j_shifter.v \
+j_shifter_MX_cell.v \
+j_acc_shifter.v \
+j_acc_shifter_MX_cell.v \
+j_acc_deshifter.v \
+j_acc_deshifter_MX_cell.v \
+j_wgt_shifter.v \
+j_wgt_shifter_MX_cell.v \
+apb2reg.v \
+reg_define.v \
+systolic_dla_top.v \
+sram.v \
+systolic_dla_top_8x8_wrapper.v \
+
+sv xil_defaultlib \
+tb_systolic_dla_top.sv \
+
+
+# compile glbl module
+verilog xil_defaultlib \
+"glbl.v"
+
+# Do not sort compile order
+nosort

@@ -1,0 +1,3236 @@
+#!/usr/bin/perl -w
+#
+# regmaker.pl - a program for generating register definitions
+# 
+# By Jeff Winston  http://www.kwcpa.com/tools  tools@kwcpa.com
+#
+# Regmaker.pl generates register descriptions in different formats from a common
+# textual input.  Outputs include HTML, Verilog, Verilog headers, C headers, and 
+# Matlab headers.
+#
+# Registers can be de-populated, and logical register size does not have to match
+# Physical register size.  Regmaker is rich with options for customizing all the 
+# views, and the C and Matlab code is customizable.
+# 
+# 
+# For usage help: Type regmaker.pl with no parameters
+#
+# Rev. 1.1,  7/8/05   Copyright (C) 2005
+# Rev. 2.0,  4/3/06   Copyright (C) 2006
+# Rev. 2.1,  5/19/06  Copyright (C) 2006
+# Rev. 2.2,  10/30/07 Copyright (C) 2007  (added decodes and big-endian byte ordering)
+# Rev. 3.0,  3/30/09  Copyright (C) 2009  minor cleanup, 16b support
+# Rev. 3.01, 7/8/09   Copyright (C) 2009  added -noverilog flag and VERILOG keyword
+# Rev. 3.02, 7/22/09  Copyright (C) 2009  minor bug fixes
+# Rev. 3.1   7/31/09  Copyright (C) 2009  added verilog header file output
+# Rev. 3.11  8/5/09   Copyright (C) 2009  added -nopipe mode (no pipelining in verilog mode)
+# Rev. 3.12  9/3/09   Copyright (C) 2009  added NOPIPE and BIGE as globals
+# Rev. 3.13  9/10/09  Copyright (C) 2009  added RWMASK values to verilog headers
+# Rev. 3.14  9/25/09  Copyright (C) 2009  converted -nolinks to spec mode, added secnum
+# Rev. 3.2  10/24/09  Copyright (C) 2009  added VARIABLE, INCLUDE, and DEFFLD
+# Rev. 3.21 11/2/09   Copyright (C) 2009  added globals DOCSNAME and AMAP_FIELD, and C enum output
+# Rev. 3.22 11/11/09  Copyright (C) 2009  minor improvements
+# Rev. 3.23 11/13/09  Copyright (C) 2009  added builtins, -vhaln, -vhm
+# Rev. 3.24  5/30/10  Copyright (C) 2010  added -nordpipe and global NORDPIPE
+# Rev. 3.25  7/10/10  Copyright (C) 2010  added support for multiple args after NEXTADDR
+# Rev. 3.26  7/10/10  Copyright (C) 2010  added some error checking on address overflow
+# Rev. 3.3  10/24/10  Copyright (C) 2010  added support for W1C 
+# Rev. 3.31  11/4/10  Copyright (C) 2010  added BASEOFF
+# Rev. 3.32 11/17/10  Copyright (C) 2010  added generation of map file with C header files (and added mask define to header)
+# Rev. 3.33   2/2/11  Copyright (C) 2011  fixed print_source output
+# Rev. 3.34  2/13/11  Copyright (C) 2011  Added register test view, and NOREGTEST, NORWTEST and MEMORY identifiers
+# Rev. 3.35  11/1/11  Copyright (C) 2011  Now requires SECTION before first ADDR
+# Rev. 3.36  7/26/13  Copyright (C) 2013  Added DISPLAY_FACTOR as global
+# Rev. 3.37  8/15/13  Copyright (C) 2013  Fixed bug related to DISPLAY_FACTOR 
+# Rev. 3.38  8/22/13  Copyright (C) 2013  Added TCL Header filename
+# Rev. 3.39  1/20/14  Copyright (C) 2014  use NOREG to mask verilog header output
+# Rev. 3.40  4/28/14  Copyright (C) 2014  if datawid =32, return {dead,addr} for illegal read addr, added DEADSTR, added BASEFACTOR, added clear for WO bits
+# Rev. 3.41  1/20/15  Copyright (C) 2015  undid change from 3.39
+# Rev. 3.42  2/13/16  Copyright (C) 2016  added PROJECT keyword
+# Rev. 3.43  5/12/16  Copyright (C) 2016  Added DECEARLY keyword
+
+$rev = "3.43";
+#
+# ---------------------------------------------------------------------
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307,
+# USA.  or check out http://www.gnu.org/copyleft/gpl.html
+# ---------------------------------------------------------------------
+#
+# THERE IS ONE KNOWN BUG:
+#
+# In Verilog Generation: 
+# if you specify a logical register that is wider than the physical register
+# and the upper section of the register is discontinuous, the verilog may
+# be incorrect.  The tool will warn you of this case, and I'll generate a fix sometime. 
+# (Let me know if you need it). 
+#
+# Example:  Using 16 bit physical registers, you specify a register that has only bits
+# 19, and 14:0 defined.  Bug: The write code for bit 19 will not be generated.
+# If you don't use discontinuous logical regs larger than physical regs, you'll be fine
+#
+#
+##################### PROJECT SPECIFIC SETTINGS
+# 1) PROJECT NAME
+$project_name = "MY PROJECT";  # <-- INSERT YOUR PROJECT NAME HERE
+#
+# 2) VERILOG CLOCK AND RESET SIGNALS
+# Verilog clock and reset signals INSERT YOURS HERE
+$regclk = "clk";
+$reg_rst_l = "reset_l";
+#
+# 3) DATA WIDTH
+# addr_incr is the number of bytes allocated to each register, primarily for verilog
+# 1 (8 bit regs), 2 (16-bit regs), and 4 (32-bit regs) are supported. 
+$addr_incr = 4;  # 32-bit
+#
+# 4) ADDRESS WIDTH
+# max number of bytes in an address
+$saddr_incr = 2; # 16-bit
+#
+# 5) BUILT-INs (Regmaker commands you want to be always processed:
+#
+#@builtins = ();
+@builtins = ("DEFFLD SEQ_RW 1 1");
+#
+#
+##################### END OF PROJECT SPECIFIC SETTINGS
+#
+# OTHER NOTES:
+#
+# Adept users should feel free to edit the print_header (for C headers) and
+# print_matlab (for Matlab headers) subroutines to get the format they prefer. 
+#
+# If you find a bug, send me an email with the source code and description of the bug.
+# Athough 2 companies have used this script successfully, I don't have a QA department 
+# and this is a complex script, so bugs are possible. Usually I can fix them very quickly.
+#
+# Acknowledgement to Christopher Briggs who designed the original HTML format, Matlab Headers and C Headers sections
+#
+####################
+
+# initialization stuff
+use File::Basename;
+$| = 1; # enable autoflush
+$nowstring =   localtime; # get the time
+
+# init flags
+$addr=-1;
+$bige=0;
+$bugck=0;
+$ca_rlast = -10;
+$ca_wlast = -10;
+$cur_file = "NUL";
+@clrlines=();
+$display_factor=1;
+$deadstr = "dead";
+$enable_rwmask=0;
+$first_section=0;
+$global_in_amap=0;
+$html_title = "Registers";
+#$maxwid=1024;   # for bookeeping, widest bit field (Synopsys limit)
+$maxwid=8192;   # for bookeeping, widest bit field (Synopsys limit) 
+$no_reg_pipe=0;
+$no_read_pipe=0;
+$noverilog=0;
+$secinit=0;
+$spec_mode= 0;
+$verbose =0;
+$title = "Registers";
+$write_header=0;
+$write_html = 0;
+$write_matlab = 0;
+$write_source = 0;
+$write_verilog=0;
+$write_verilog_header=0;
+$write_tcl_header =0;
+$write_register_test=0;
+
+%global=();
+%gname=();
+%nname=();
+# address msb
+$dmsb =  ( $addr_incr * 8) - 1;  # msb of data in verilog
+$bmsb  = ($saddr_incr * 8) - 1;  # msb of address in verilog
+$sbmsb = ($saddr_incr * 8) - 1;  # msb of address in verilog header
+
+# list of valid keywords
+@keywords = ("ADDR", "NAME", "SECTION","STARTADDR", "ENDADDR", "NEXTADDR",
+	     "SHORTNAME", "RWTYPE", "FN", "RESET", "BIT", "END","REGDES","DECODE","DECEARLY","DECOFF","NOREG","DEFFLD","MEMORY","NOREGTEST","NORWTEST",
+	     "VNAME","BITFIELDS","TITLE","HTML_TITLE","BASEOFF","BASEFACTOR","BASEADDR","DEFAULT","VERILOG","NOVERILOG","MATLAB_NAME",
+	     "PROJECT");
+
+# output these to sourcefile as comments
+@commented_on_output = ("BITFIELDS");
+
+# these fields need strict format check
+@need_addr_check = ("ADDR","STARTADDR","ENDADDR","NEXTADDR","BASEFACTOR","BASEOFF","BASEADDR");
+
+# these fields need base address added
+@rel_addr = ("ADDR","STARTADDR","ENDADDR","NEXTADDR");
+
+# permitted definitions for rwtype
+@rwfields = ("RW","RO","WO","W1C","NA");
+
+# lists are stored for these keys
+@simple_list = ("STARTADDR","ENDADDR","BITFIELDS","NEXTADDR");
+
+# real no-token keys
+@notoken_flags = ("VERILOG","NOVERILOG","NOREG","MEMORY","NORWTEST","NOREGTEST","DECEARLY");
+
+# number of arguments each keyword takes. 2=string w/spaces
+$keyw_len{"DEFAULT"} = 1;
+$keyw_len{"BASEADDR"} = 1;
+$keyw_len{"BASEOFF"} = 1;
+$keyw_len{"BASEFACTOR"} = 1;
+$keyw_len{"ADDR"} = 1;
+$keyw_len{"STARTADDR"} = 1;
+$keyw_len{"ENDADDR"} = 1;
+$keyw_len{"NEXTADDR"} = 1;
+$keyw_len{"RESET"} = 1;
+$keyw_len{"BIT"} = 1;
+$keyw_len{"MATLAB_NAME"} = 1;
+$keyw_len{"REGDES"} = 0;
+$keyw_len{"SHORTNAME"} = 2;
+$keyw_len{"RWTYPE"} = 1;
+$keyw_len{"FN"} = 2;
+$keyw_len{"VNAME"} = 1;
+$keyw_len{"NAME"} = 2;
+$keyw_len{"END"} = 0;
+$keyw_len{"NOVERILOG"} = 0;
+$keyw_len{"VERILOG"} = 0;
+$keyw_len{"NOREG"} = 0;
+$keyw_len{"NORWTEST"} = 0;
+$keyw_len{"NOREGTEST"} = 0;
+$keyw_len{"MEMORY"} = 0;
+$keyw_len{"SECTION"} = 2;
+$keyw_len{"TITLE"} = 2;
+$keyw_len{"HTML_TITLE"} = 2;
+$keyw_len{"DECODE"} = 1;
+$keyw_len{"DECEARLY"} = 0;
+$keyw_len{"DECOFF"} = 1;
+$keyw_len{"DEFFLD"} = 2;
+$keyw_len{"PROJECT"} = 1;
+
+#parse command line
+
+# no arguments - print help
+if ($#ARGV == -1) {
+    print_help(0);
+}
+
+while ($#ARGV > -1) {
+
+    # print help
+    if ($ARGV[0] eq "-h") {
+	print_help(0);
+    }
+
+    # print long help
+    elsif ($ARGV[0] eq "-l") {
+	print_help(1);
+    }
+
+    # -c means print database in C header file format
+    elsif ($ARGV[0] eq "-c") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $header_filename = shift @ARGV;
+	    $write_header = 1;
+	}
+    }
+
+    # -p is used to indicate project name
+    elsif ($ARGV[0] eq "-p") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $project_name = shift @ARGV;
+	}
+    }
+
+    # -s means print database in source format
+    elsif ($ARGV[0] eq "-s") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $source_filename = shift @ARGV;
+	    $write_source = 1;
+	}
+    }
+
+    # -v means print verilog 
+    elsif ($ARGV[0] eq "-v") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $verilog_filename = shift @ARGV;
+	    $write_verilog = 1;
+	}
+    }
+
+    # variable definition
+    elsif ($ARGV[0] eq "-var") {
+	if (($#ARGV < 2) || (substr($ARGV[1],0,1) eq "-") || (substr($ARGV[2],0,1) eq "-")) {
+	    print "No arguments for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    $vars{$ARGV[1]} = $ARGV[2];
+	    shift @ARGV;
+	    shift @ARGV;
+	    shift @ARGV;
+	}
+    }
+
+    # -th means print TCL header file
+    elsif ($ARGV[0] eq "-th") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $tcl_header_filename = shift @ARGV;
+	    $write_tcl_header = 1;
+	}
+    }
+
+    # -vh means print verilog header file
+    elsif ($ARGV[0] eq "-vh") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $verilog_header_filename = shift @ARGV;
+	    $write_verilog_header = 1;
+	}
+    }
+
+    # -vhm means print verilog header file with RWMASK
+    elsif ($ARGV[0] eq "-vhm") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $verilog_header_filename = shift @ARGV;
+	    $write_verilog_header = 1;
+	    $enable_rwmask=1;
+	}
+    }
+
+    # -rt means print register test file 
+    elsif ($ARGV[0] eq "-rt") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $register_test_filename = shift @ARGV;
+	    $write_register_test = 1;
+	}
+    }
+
+    # -vhaln length of header address definitions in verilog header file
+    elsif ($ARGV[0] eq "-vhaln") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $sbmsb = (shift @ARGV) - 1;
+	}
+    }
+
+    # -m means print matlab tasks
+    elsif ($ARGV[0] eq "-m") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $matlab_filename = shift @ARGV;
+	    $write_matlab = 1;
+	}
+    }
+
+
+
+
+    # -w means generate html (Web page)
+    elsif ($ARGV[0] eq "-w") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No file argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $html_filename = shift @ARGV;
+	    $write_html = 1;
+	}
+    }
+
+    # -secnum means first section # for html
+    elsif ($ARGV[0] eq "-secnum") {
+	if (($#ARGV < 1) || (substr($ARGV[1],0,1) eq "-")) {
+	    print "No argument for $ARGV[0].  Use -h for help. Exiting...\n\n";
+	    exit;
+	} else {
+	    shift @ARGV;
+	    $secinit = shift @ARGV;
+	    $secinit--;
+	}
+    }
+
+    # -spec_mode
+    elsif ($ARGV[0] eq "-spec") {
+	shift @ARGV;
+	$spec_mode= 1;
+    }
+
+    # -no pipe = no register delays in verilog
+    elsif ($ARGV[0] eq "-nopipe") {
+	shift @ARGV;
+	$no_reg_pipe=1;
+    }
+
+    # -no read pipe = no post-read register delays in verilog
+    elsif ($ARGV[0] eq "-nordpipe") {
+	shift @ARGV;
+	$no_read_pipe=1;
+    }
+
+    # -big-endian register ordering
+    elsif ($ARGV[0] eq "-bige") {
+	shift @ARGV;
+	$bige=1;
+    }
+
+    # -vb = verbose
+    elsif ($ARGV[0] eq "-vb") {
+	shift @ARGV;
+	$verbose = 1;
+    }
+
+    # No verilog by default
+    elsif ($ARGV[0] eq "-noverilog") {
+	shift @ARGV;
+	$noverilog=1;
+    }
+
+    # no other valid qualifiers
+    elsif (substr($ARGV[0],0,1) eq "-") {
+	print "Bad qualifier $ARGV[0]. use -h for help.  Exiting...\n\n";
+	exit;
+    } else {
+	$foo = shift @ARGV;
+	push @input_filenames, $foo;
+    }
+}
+	
+# no input file names - that's a problem
+if ($#input_filenames == -1) {
+    print "No input files.  use -h for help.  Exiting...\n\n";
+    exit;
+}
+
+#end parsing
+
+
+#parse built-in commands 
+input_process(@builtins);
+
+# process input filenames in order
+foreach $infile (@input_filenames) {
+    
+    # process includes and variable substitutions
+    @filelines = init_proc($infile);
+
+    # process file
+    input_process(@filelines);
+}
+
+# do special transformations
+do_processing(@addrlist);
+
+# sort database by address
+@sorted_addr = special_sort(@addrlist);
+
+
+# write requested output files
+if ($write_html == 1)   {
+    print_html(@sorted_addr);
+}
+if ($write_source == 1) {
+    print_source(@sorted_addr);
+}
+
+if ($write_header == 1) {
+    print_header(@sorted_addr);
+}
+if ($write_verilog == 1)   {
+    print_verilog(@sorted_addr);
+}
+if ($write_tcl_header == 1)   {
+    print_tcl_header(@sorted_addr);
+}
+if ($write_verilog_header == 1)   {
+    print_verilog_header(@sorted_addr);
+}
+if ($write_register_test == 1)   {
+    print_register_test(@sorted_addr);
+}
+if ($write_matlab == 1)   {
+    print_matlab(@sorted_addr);
+}
+exit;
+
+#main routine ends here
+
+# input processing
+sub input_process {
+
+    #initialize globals as needed
+    $bitdes=0;
+    $regdes=0;
+    $dupcnt=1;
+    $lastsec="NULL";
+    $lastbase = 0;
+    $baseoff = 0;
+    $basefactor = 1;
+    $lno=0;
+    foreach $line (@_) {
+	$lno++;
+	
+	# get the tokens of the line
+	@words = split " ",$line;
+
+	# resolve abbreviations/corrections
+	if (($bitdes==0) && ($regdes==0)) {
+	    $line =~ s/^SNAME/SHORTNAME/;
+	    if ($#words == 0) {
+		if    (uc($words[0]) eq "RO") {$line = "RWTYPE RO";}
+		elsif (uc($words[0]) eq "RW") {$line = "RWTYPE RW";}
+		elsif (uc($words[0]) eq "WO") {$line = "RWTYPE WO";}
+		elsif (uc($words[0]) eq "W1C") {$line = "RWTYPE W1C";}
+		elsif (uc($words[0]) eq "NA") {$line = "RWTYPE NA";}
+	    }
+	    elsif ($#words == 1) {
+		if (uc($words[0]) eq "BITS") {
+		    $line = "BIT $words[1]";
+		}
+	    }
+	    if ((length($line) > 3) && (lc(substr($line,0,3)) eq "bit") && (substr($line,0,3) ne "BIT")) {
+		print "Warning: On line $lno of file $infile:  Line starts with \"" . substr($line,0,3) . "\", but not uppercase\n";
+	    }
+	    @words = split " ",$line;
+	}
+
+	# check for valid number of tokens
+
+	$toknum= do_check($line);
+
+	# if it's a text line
+	if ($toknum == -1) {
+	
+	    # if we're within a bit description, store the line in the right key
+	    if ($bitdes > 0) {
+		push @{$data{$bitkey}}, $line;
+		
+		# otherwise, if we're in a REG description, collect the line into the register description
+	    } elsif ($regdes == 1) {
+		push @{$data{$regkey}}, $line;
+	    } else {
+		print "Error: ($cur_file) Invalid Line, exiting: $line\n";
+		exit;
+	    }
+	
+	    # otherwise, if the line starts with a valid keyword
+	} elsif ($toknum > -1) {
+	
+	    # if we were doing a bitfield or reg description, we're done
+	    $bitdes=0;
+	    $regdes=0;
+	
+	    if (($words[0] eq "ADDR") && ($first_section == 0)) {
+		print "ERROR: No Section name before first register\n";
+		exit;
+	    } elsif ($words[0] eq "SECTION") {
+		$first_section=1;
+	    }
+
+	    # if the line starts with a keyword that takes a single argument, or on argument
+	    if ($toknum  < 2) {
+		
+		# special preprocessing for *ADDR - add to list if a new address, generate
+		# key for register description
+
+		if (lsearch($words[0],@need_addr_check) == 1) {
+		    while (length($words[1]) < $addr_incr) {
+			$words[1] = "0" . $words[1];
+		    }
+		    check_addr($words[1]);
+		}
+
+		# add base address
+		if (lsearch($words[0],@rel_addr) == 1) {
+#		    $x=$words[1];
+		    for ($x=1;$x<=$#words;$x++) {
+			if (($basefactor * hex($words[$x])) + hex($lastbase) +hex($baseoff) > 2**32) {
+			    print "Error:  ($cur_file) Adding Base $lastbase + offset $baseoff to ($basefactor * $words[$x]) produced 32b overflow.  Perhaps your BASEADDR or BASEOFF is incorrect?\n\n";
+			    exit;
+			}
+			$words[$x] = sprintf("%04x",($basefactor * hex($words[$x])) + hex($lastbase) + hex($baseoff));
+		    }
+		}
+
+		# end special pre-processing for *ADDR / start normal parsing
+
+		if ($words[0] eq "BASEADDR") {
+		    $lastbase = $words[1];
+		    next;
+		}
+	
+		elsif ($words[0] eq "BASEOFF") {
+		    $baseoff = $words[1];
+		    next;
+		}
+	
+		elsif ($words[0] eq "BASEFACTOR") {
+		    $basefactor = $words[1];
+		    next;
+		}
+		elsif ($words[0] eq "PROJECT") {
+		    $project_name = $words[1];
+		    next;
+		}
+	
+		elsif ($words[0] eq "REGDES") {
+		    $regdes=1;
+		    next;
+		}
+
+		elsif ($words[0] eq "ADDR") {
+
+		    $addr = gen_case(hex($words[1]),$bmsb,1,0);
+
+		    if (lsearch($addr,@addrlist) == 0) {
+			push @addrlist,$addr;
+		    }
+
+		    $seckey = $addr . "_SECTION";
+		    $data{$seckey} = $lastsec;
+		    
+		    $basekey = $addr . "_BASEADDR";
+		    $data{$basekey} = $lastbase;
+		    $offkey = $addr . "_BASEOFF";
+		    $data{$offkey} = $baseoff;
+		    $factorkey = $addr . "_BASEFACTOR";
+		    $data{$factorkey} = $basefactor;
+
+		    $regkey = $addr . "_REGDES";
+		    $rwfield = "RW";
+
+		    if (defined($acnt{$addr})) {
+			$acnt{$addr}++;
+			if ($acnt{$addr} > $dupcnt) {
+			    print "Error: ($cur_file) Duplicate Entry for ADDR $addr ($line)\n";
+			    exit;
+			}
+		    } else {
+			$acnt{$addr} = 1;
+		    }
+		
+		    # special case BIT - store bitwidth in list. generate major key,
+		    # generate key for description list, and set flag to look for
+		    # description
+		} elsif ($words[0] eq "BIT") {
+		    $key = $addr . "_" . $words[0];
+		    push @{$data{$key}}, $words[1];
+		
+		    $bitkey = $addr . "_" . $words[0] . "_" . $words[1];
+		    $bitdes=1;
+		
+		    # no bit fields larger than maxwid  for now
+		    if ($words[1] =~ ":") {
+			@tmpxx = split ":",$words[1];
+			$tmpx2 = $tmpxx[0] - $tmpxx[1];
+		    } else {
+			$tmpx2 = $words[1];
+		    }
+		    if ($tmpx2 > $maxwid) {
+			print  "Error: ($cur_file) Bitfield larger than $maxwid bits on line $lno: $line. Exiting...\n";
+			exit;
+		    }
+
+		    # parse/store rwtype field, otherwise, default to register
+		    # otherwise default to RW
+		    $rwfield = "FOO";
+		    if ($#words == 2) {
+			if (lsearch($words[2],@rwfields) == 0) {
+			    print "Error: ($cur_file) Invalid RW field: $line\n";
+			} else {
+			    $rwfield = $words[2];
+			}
+		    }
+		    if ($rwfield eq "FOO") {
+			$rwkey = $addr . "_RWTYPE";
+			if (defined ($data{$rwkey})) {
+			    $rwfield = $data{$rwkey};
+			} else {
+			    $rwfield = "RW";
+			}
+		    }
+		    # store RW field for bit field
+		    $rwbkey = $bitkey . "_" . "RW";
+		    $data{$rwbkey} = $rwfield;
+
+		    # deal with other input lists
+		} elsif (lsearch($words[0],@simple_list) == 1) {
+		    $key = $addr . "_" . $words[0];
+		    for ($x=1; $x <= $#words; $x++) {
+			check_addr($words[$x]);
+			push @{$data{$key}}, $words[$x];
+		    }
+
+		    # RESET MAY NEED FORMATTING
+		} elsif ($words[0] eq "RESET") {
+		    $words[1] =~ tr/\_//d;
+		    if ((substr(lc($words[1]),0,2) ne "0x") &&
+			(lc($words[1]) =~ /^[0-9a-f]+$/)) {
+			$words[1] = "0x" . $words[1];
+		    }
+		    if (lc($words[1]) =~ /^0x0+$/) {
+			$words[1] = "0x0";
+		    }
+		    if ((lc($words[1]) !~ /0x[0-9a-f]+/) &&
+			(lc($words[1]) ne "undefined") &&
+			(lc($words[1]) !~ /\'d[0-9]+/)) {
+			print "Error: ($cur_file) Bad Reset value: /$words[1]/ $line\n";
+		    } else {
+			$key = $addr . "_" . $words[0];
+			$data{$key}= $words[1];
+		    }
+		    # otherwise, generate key and store data
+		} else {
+		    if ($toknum == 1) {
+			$key = $addr . "_" . $words[0];
+			$data{$key} = $words[1];
+
+			if (($words[0] eq "RWTYPE") && (lsearch($words[1],@rwfields) == 0)) {
+			    print "Error: ($cur_file) Invalid RW field: $line\n";
+			}
+			
+			$skey = $addr . "_" . "SHORTNAME";
+			if (($words[0] eq "NAME") && (!(defined($data{$skey})))) {
+			    $data{$skey} = $words[1];
+			}
+		    } elsif (lsearch($words[0],@notoken_flags) == 1)  {  # toknum = 0
+			{
+			    $key = $addr . "_" . $words[0];
+			    $data{$key} = 1;
+			}
+		    }
+		}
+	    }
+	
+	    # if the line starts with a keyword that takes a string
+	    # generate the key, and store the string
+	    elsif ($toknum == 2) {
+		$key = $addr . "_" . $words[0];
+		$subline = substr($line, index($line,$words[1]));
+		$subline =~ s/\s+$//g; # remove trailing spaces
+		
+		# keep a list of section headers
+		if ($words[0] eq "SECTION") {
+		    if (lsearch($subline,@seclist) == 0) {
+			push @seclist, $subline;
+		    }
+		    $lastsec = $subline;
+		    next;
+		} elsif ($words[0] eq "TITLE") {
+		    if ($title ne "Registers") {
+			print "Ignoring TITLE command after the first: $line\n";
+		    } else {
+			$title = substr($line,6);
+		    }
+		} elsif ($words[0] eq "HTML_TITLE") {
+		    if ($html_title ne "Registers") {
+			print "Ignoring HTML_TITLE command after the first: $line\n";
+		    } else {
+			$html_title = substr($line,11);
+		    }
+		} elsif ($words[0] eq "DEFFLD") {
+		    if (($#words != 3) ||
+			($words[2] !~ /[0-2]/) ||
+			($words[3] !~ /[0-1]/)) {
+			print "Error: ($cur_file) Badly constructed DEFFLD statement: $line\n";
+			exit;
+		    }
+		    push @keywords,$words[1];
+		    $keyw_len{$words[1]} = $words[2];
+		    if ($words[3] == 1) {
+			$descr{$words[1]} = 1;
+		    }
+		}
+		$data{$key} = $subline;
+	    }
+	}
+    }
+}
+
+
+#HTML print routine
+
+sub print_html {
+
+    # open output file
+    open (OUTFIL, "> $html_filename") or die "Error opening $html_filename\n";
+
+    $revision = "Generated $nowstring\n";
+
+    # document header
+    push @seclines,  "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\">\n";
+    push @seclines,  "<html><head><meta content=\"text/html; charset=ISO-8859-1\" http-equiv=\"content-type\">\n";
+    push @seclines,  "<title>$html_title</title></head><body><B><P ALIGN=CENTER><A NAME=\"SECTOC\"><U>Project: $project_name</U></B></P></a>\n";
+    push @seclines,  "<title>$html_title</title></head><body><B><P ALIGN=CENTER><A NAME=\"SECTOC\"><U>$title</U></B></P></a>\n";
+    push @seclines,  "<P ALIGN=CENTER>$revision</B></P><P ALIGN=CENTER><U>Section TOC</U></P>\n";
+    push @seclines,  "<a href =\"\#ADRMAP\"> <B>Address MAP</B></a><br>\n";
+
+    push @toclines,  "<P ALIGN=CENTER><U>Table of Contents</U></P>";
+
+
+    # section counter
+    $secnum = $secinit;
+#    $first_time = 0;
+
+    # go by section
+    foreach $sechead (@seclist) {
+
+	$secnum++;
+
+	# flag so that we write section head
+	$newsec=1;
+
+	# counter to number registers in section
+	$regnum=0;
+
+	# and within section, by address
+	foreach $adr (@_) {
+
+
+	    $akey = $adr . "_";
+
+	    # generate keys
+	    $skey =  $akey . "SECTION";
+	    $rkey =  $akey . "RESET";
+	    $nkey =  $akey . "NAME";
+	    $bkey =  $akey . "BIT";
+	    $rwkey = $akey . "RWTYPE";
+	    $snkey = $akey . "SHORTNAME";
+#	    $fnkey = $akey . "FN";
+	    $stkey = $akey . "STARTADDR";
+	    $nakey = $akey . "NEXTADDR";
+	    $eakey = $akey . "ENDADDR";
+	    $rdkey = $akey . "REGDES";
+	    $dfkey = $akey . "DEFAULT";
+	    $nrdkey= $akey . "NO_RES_DEF";
+	
+	    # if register is in this section, print it
+	    if ($data{$skey} eq $sechead) {
+
+		# increment register count
+		$regnum++;
+
+		# if first register in section, print section header, enter in TOC
+		if ($newsec == 1) {
+		    push @outlines,  "<br><br><B>" . $secnum . ".0 $data{$skey}</B>\n";
+		    push @toclines,  "<A NAME=\"TOC$secnum\"><br><B>" . $secnum . ".0 $data{$skey}</B></a><br>\n";
+		    push @seclines,  "<a href = \"\#TOC$secnum\"><B>" . $secnum . ".0 $data{$skey}</B></a><br>\n";
+		    $newsec = 0;
+		}
+
+		# generate link references
+		$ref = "REF_" . $secnum . "_" . $regnum;
+		$mref = "MAP_" . $ref;
+
+
+		# generate address string
+		$addrstr = "0x" . dfactor($adr);
+
+		# copy the endaddress list to a tmp list for easier manipulation
+
+		if (defined($data{$eakey})) {
+		    @eatmp = ();
+		    foreach $eaddr (@{$data{$eakey}}) {
+			push @eatmp, dfactor($eaddr);
+		    }
+		    $ea=0;
+		    $enda = $eatmp[$ea];
+		    $addrstr = $addrstr . " - 0x" . $enda;
+		}
+
+		if (defined($data{$stkey})) {
+		    foreach $starta (@{$data{$stkey}}) {
+			$ea++;
+			$enda = $eatmp[$ea];
+			$st2 = dfactor($starta);
+			$addrstr = $addrstr . ", 0x" . "$st2 - 0x" . $enda;
+		    }
+		}
+		if (defined($data{$nakey})) {
+		    foreach $tmpadr (@{$data{$nakey}}) {
+			$addrstr = $addrstr . ", 0x" . dfactor($tmpadr);
+		    }
+		}
+		
+		$addrstr = uc($addrstr);
+		$addrstr =~ s/X/x/g;
+		# generate description string
+
+		$des_string = "";
+		if (defined($data{$rdkey})) {
+		    foreach $des (@{$data{$rdkey}}) {
+			$des_string = $des_string . $des . "\n";
+		    }
+		}
+
+		# add general keywords to description
+		$x=0;
+		foreach $kw (@keywords) {
+		    $ky = $akey.$kw;
+		    if ((defined($descr{$kw})) && (defined($data{$ky}))) {
+			$des_string = $des_string . " ($kw = $data{$ky}) ";
+			$x=1;
+		    }
+		}
+		if ($x==1) {$des_string = $des_string . "\n";}
+
+		# short name substitution
+		$snlabel = "SHORT NAME";
+		$snvalue = $data{$snkey};
+		if (defined($global{"docsname"})) {
+		    $ky = $global{"docsname"};
+		    $dskey = $akey . uc($ky);
+		    if(defined($data{$dskey})) {
+			$snlabel = uc($ky);
+			$snvalue = $data{$dskey};
+		    }
+		}
+
+
+		# generate register documentation
+		push @toclines,  "<a href=\"\#$ref\">$secnum" . "." . "$regnum\t" . $data{$nkey} . "<br></a>\n";
+
+		push @outlines,  "<br><br><A NAME=\"$ref\"><B>$secnum" . "." . "$regnum" . " " . $data{$nkey} . "</B></a><br><br>\n";
+		push @outlines,  "<table style=\"width: 100%; text-align: left;\" border=\"1\" cellpadding=\"2\"cellspacing=\"2\"><tbody>\n";
+		push @outlines,  "<tr><td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">ADDR<br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  45%;\"><a href =\"\#$mref\">$addrstr</a><br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">$snlabel<br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  25%;\">$snvalue<br></td></tr>\n";
+
+		if ($data{$nrdkey}==0) {
+		    push @outlines,  "<tr><td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">DEFAULT<br></td>\n";
+		    push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  45%;\">$data{$dfkey}<br></td>\n";
+		    push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">RESET<br></td>\n";
+		    push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  25%;\">$data{$rkey}<br></td></tr>\n";
+		}
+
+		push @outlines,  "<tr><td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">DESCRIPTION<br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  45%;\">$des_string<br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width:  15%;\">RWTYPE<br></td>\n";
+		push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204);                    width:  25%;\">$data{$rwkey}<br></td></tr>\n";
+
+		# if (defined(@{$data{$bkey}})) {
+
+		#     push @outlines,  "</tbody></table><table style=\"width: 100%; text-align: left;\" border=\"1\" cellpadding=\"2\"cellspacing=\"2\"><tbody>\n";
+		#     push @outlines,  "<tr><td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width: 80px;\">BIT<br></td>\n";
+		#     push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; width: 80px;\">RW<br></td>\n";
+		#     push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); font-weight: bold; text-align: center;\">DESCRIPTION<br></td></tr>\n";
+		# }
+		# accumulate address map entries as they are printed in a different order (strictly by address)
+		push @{$admlines{$adr}}, "<tr><td style=\"vertical-align: top; width: 15%;\"><A NAME = \"$mref\"></A><a href=\"\#$ref\">$addrstr</a></td>\n";
+		push @{$admlines{$adr}}, "    <td style=\"vertical-align: top; width:  5%;\">$data{$rwkey}</td>\n";
+
+
+		
+		# optional extra field
+		if (defined($global{"amap_field"})) {
+		    $nm = 50;
+		    $kywd = uc($global{"amap_field"});
+		    $ky = $akey . $kywd;
+		    if (defined($data{$ky})) {
+			$dat="";
+			if($keyw_len{$kywd} == 1) {
+			    $dat = $data{$ky};
+			}
+			else {
+			    foreach $wd (@{$data{$ky}}) {
+				$dat = $dat . $wd . " ";
+			    }
+			    $nm=30;
+			}
+			push @{$admlines{$adr}}, "    <td style=\"vertical-align: top; width: ".$nm."%;\">$data{$nkey}</td>\n";
+			$n2 = 80-$nm;
+			push @{$admlines{$adr}}, "    <td style=\"vertical-align: top; width: ".$n2."%;\">$dat</td></tr>\n";
+			$global_in_amap=1;
+		    }
+		}
+		if ($global_in_amap==0) {
+		    push @{$admlines{$adr}}, "    <td style=\"vertical-align: top; width: 80%;\">$data{$nkey}</td></tr>\n";
+		}
+
+		# loop on bit fields
+		foreach $sb (@{$data{$bkey}}) {
+		    $bitkey = $bkey . "_" . $sb;
+		    $rwkey = $bitkey . "_" . "RW";
+		    push @outlines,  "<tr><td style=\"vertical-align: top; background-color: rgb(204, 204, 204); width: 80px;\">$sb<br></td>\n";
+		    push @outlines,  "    <td style=\"vertical-align: top; background-color: rgb(204, 204, 204); width: 80px;\">$data{$rwkey}<br></td>\n";
+		    push @outlines,  "    <td style=\"vertical-align: top;\">\n";
+		    foreach $des (@{$data{$bitkey}}) {
+			push @outlines,  "$des<br>\n";
+		    }
+		    push @outlines,  "</td></tr>\n";
+		}
+		push @outlines,  "</tbody></table>";
+		if ($spec_mode == 0) {
+		    push @outlines,  "<a href =\"\#SECTOC\"> Master TOC</a>&nbsp;&nbsp;&nbsp; <a href =\"\#TOC$secnum\">$data{$skey} TOC</a><br>";
+		}
+		push @outlines, "</body></html>\n";
+	    }
+	}
+    }
+
+    push @toclines,"<br><br>\n";
+
+    if ($spec_mode == 0) {
+	# print section TOC, and regular TOC
+	foreach $line (@seclines) {
+	    print OUTFIL $line;
+	}
+	foreach $line (@toclines) {
+	    print OUTFIL $line;
+	}
+	
+	# print address map
+	print OUTFIL "<html><head><meta content=\"text/html; charset=ISO-8859-1\"http-equiv=\"content-type\">\n";
+	print OUTFIL "<title></title></head><body><B><P ALIGN=CENTER><A NAME=\"ADRMAP\">ADDRESS MAP<B></a></p>\n";
+	print OUTFIL "<table style=\"width: 100%; text-align: left;\" border=\"1\"cellpadding=\"2\"cellspacing=\"2\"><tbody>\n";
+
+	foreach $adr (@_) {
+	    foreach $line (@{$admlines{$adr}}) {
+		print OUTFIL $line;
+	    }
+	}
+	print OUTFIL  "</tbody></table><br></body></html>\n";
+    }
+    # print reg descriptions
+    foreach $line (@outlines) {
+	print OUTFIL $line;
+    }
+    close (OUTFIL);
+    print "$html_filename written\n";
+}
+
+# MATLAB print routine
+
+sub print_matlab {
+
+    open (MFIL, "> $matlab_filename") or die "Error opening $matlab_filename\n";
+
+    # Print header
+    print MFIL "// \$Id\$\n// This file was generated by regmaker.pl\n\n";
+
+    print MFIL "// include guards\n";
+    $def_name = "_" . uc(basename($matlab_filename, ".sv")) . "_";
+    print MFIL "`ifndef $def_name\n";
+    print MFIL "  `define $def_name\n\n";
+
+    foreach $adr (@_) {
+
+	$akey = $adr . "_";
+	$snkey = $akey . "SHORTNAME";
+
+	$btkey = $adr . "_BITFIELDS";
+	@msbfield = split "_",${$data{$btkey}}[0];
+	$width = $msbfield[0] + 1;
+
+	$mkey = $adr . "_MATLAB_NAME";
+	if (defined($data{$mkey})) {
+	    $mtadr{$data{$mkey}} = $adr;
+	    $mtwid{$data{$mkey}} = $width;
+	}
+
+#	@addrs = adr_expand($adr,0);
+#	foreach $ade (@addrs) {
+#	    $name = $gname{$ade};
+	    $name = $data{$snkey};
+
+#	    $mtadr{$name} = sprintf("%x",$ade);
+	    $mtadr{$name} = sprintf("%x",hex($adr));
+	    $mtwid{$name} = $width;
+#	}
+    }
+
+# Prefer sorted list. 
+#    while (($key,$value) = each(%mtadr)) {
+#	print MFIL "$key, $value, $mtwid{$key}\n";
+#    }
+    foreach $key (sort(keys(%mtadr))) {
+      if ($key !~ /_i([1-9]+)$/) {
+	printf MFIL "  `define %s %s 16'h%s\n", uc($key), " " x (40 - length($key)), $mtadr{$key};
+	push @width_list,
+	  sprintf "        reg_widths[16'h%s] = %s;\n", $mtadr{$key}, $mtwid{$key};
+      }
+    }
+    print MFIL "\n     initial begin\n";
+    print MFIL "@width_list";
+    print MFIL "     end\n\n";
+
+    # Print footer
+
+    # Old version
+    #print MFIL "\nendtask\n\n";
+
+    # New version
+    print MFIL "`endif // `ifndef $def_name\n";
+
+    close (MFIL);
+    print "$matlab_filename written\n";
+}
+
+# C header print routine
+
+sub print_header {
+    $nowstring =   localtime;
+    # open output file
+    $dot = rindex($header_filename,".");
+    if ($dot > 0) {
+	$header_stem = substr($header_filename,0,$dot);
+    } else {
+	$header_stem = $header_filename;
+    }
+    $code_filename   = $header_stem . ".c";
+    $enum_filename   = $header_stem . "_enum.c";
+    $header_filename = $header_stem . ".h";
+    $map_filename    = $header_stem . "_map.h";
+
+    $hfilename = $header_filename;
+    $sl = index($hfilename,"/");
+    while ($sl > -1) {
+	$hfilename = substr($hfilename,$sl+1);
+	$sl = index($hfilename,"/");
+    }
+    if (!(defined(($global{"sfr"})))) {
+	open (CODEFIL, "> $code_filename")   or die "Error opening $code_filename\n";
+	print CODEFIL "\#include <$hfilename>\n";
+    }
+
+
+    open (HEADFIL, "> $header_filename") or die "Error opening $header_filename\n";
+    print HEADFIL "/*-------------------------------------------------\n";
+    print HEADFIL "$hfilename\n";
+    print HEADFIL "\nHeader file.\n";
+    print HEADFIL "Created: $nowstring\n";
+    print HEADFIL "-------------------------------------------------*/\n\n";
+
+    open (ENUMFIL, "> $enum_filename"  ) or die "Error opening $enum_filename\n";
+    print ENUMFIL "/*-------------------------------------------------\n";
+    print ENUMFIL "$enum_filename\n";
+    print ENUMFIL "\nHeader file (enum format).\n";
+    print ENUMFIL "Created: $nowstring\n";
+    print ENUMFIL "-------------------------------------------------*/\n\n";
+
+    open (MAPFIL, "> $map_filename")   or die "Error opening $map_filename\n";
+    print MAPFIL "/*-------------------------------------------------\n";
+    print MAPFIL  "$map_filename\n";
+    print MAPFIL  "\nHeader file (map format).\n";
+    print MAPFIL  "Created: $nowstring\n";
+    print MAPFIL  "-------------------------------------------------*/\n\n";
+
+    $tmp = uc($hfilename);
+    $tmp =~ s/\./\_/g;
+    print HEADFIL "\#ifndef _" .$tmp."_\n";
+    print HEADFIL "\#define _" .$tmp."_\n";
+
+    print MAPFIL "\#ifndef _" .$tmp."_MAP_\n";
+    print MAPFIL "\#define _" .$tmp."_MAP_\n";
+    print MAPFIL "\n\n\n   map <uint32_t, uint32_t> reg_map; \n";
+
+    foreach $sechead (@seclist) {
+	$mina=4200000000; $maxa=0;
+	print HEADFIL "\n\n\/* Section: $sechead */\n";
+	@enums=();
+	print ENUMFIL "\n\n\/* Section: $sechead */\n";
+
+	foreach $adr (@_) {
+	    $skey =  $adr . "_SECTION";
+	    $shkey = $adr . "_SHORTNAME";
+	    $rwkey = $adr . "_RWTYPE";
+	    $dfkey = $adr . "_DEFAULT";
+	    $nkey  = $adr . "_NAME";
+	    $bskey = $adr . "_BASEADDR";
+	    $ofkey = $adr . "_BASEOFF";
+	
+	    if ($data{$skey} eq $sechead) {
+		@addrs = adr_expand($adr,1);
+		foreach $ade (@addrs) {    
+		    $padr = sprintf("%02x",$ade);
+		    $badr = sprintf("%04x",$ade);
+		    
+		    $bs = sprintf("%x",hex($data{$bskey}) + hex($data{$ofkey}));
+		    
+		    $usename = $nname{$ade};  
+#		    $usename = $gname{$ade};  
+#		    $usename = $data{$nkey};  
+
+		    if ($ade < $mina) {$mina = $ade;}
+		    if ($ade > $maxa) {$maxa = $ade;}
+
+		    if (defined(($global{"sfr"}))) {
+			printf HEADFIL ("sfr %40s = 0x%s;\n",uc($usename),$padr);
+		    } else {
+			$stmp = $data{$rwkey};
+			$def = "U" . 8* $addr_incr . "_" . $stmp . "_REG";
+			
+			$reladr = $ade - hex($bs);
+			printf HEADFIL ("\n#define %s 0x%s\n", uc($usename),$badr);
+#			printf HEADFIL ("\n#define %s_ADDR 0x%s\n", uc($usename),$badr);
+#			printf HEADFIL ("extern $def %s; // %s, DEFAULT: %s\n",uc($usename),$badr,$data{$rwkey},$data{$dfkey});
+		        $actstr = gen_reg_masks($adr,1);
+                       	printf HEADFIL ("#define %s_RWMASK 0x%s\n", uc($usename),$actstr );
+			printf MAPFIL ("   reg_map[%s] \t\t =  %s_RWMASK ;\n", uc($usename), uc($usename));
+
+			printf CODEFIL ("%s %s _at_  %s_ADDR;\n",$def, uc($usename), uc($usename));
+			push @enums, sprintf ("    %s = %d,\n",uc($usename),$reladr);
+
+		    }
+		}
+	    }
+	}
+	printf ENUMFIL ("#define $sechead"."_REG_START_ADDR 0x%x\n",$mina);
+	printf ENUMFIL ("#define $sechead"."_REG_END_ADDR 0x%x\n",$maxa);
+
+	print ENUMFIL "enum\n{\n";
+	foreach $line (@enums) {print ENUMFIL $line;}
+	print ENUMFIL "}\n";
+    }
+    print HEADFIL "#endif\n";
+    print MAPFIL "#endif\n";
+    close (ENUMFIL);
+    close (HEADFIL);
+    if (!(defined(($global{"sfr"})))) {
+	close (CODEFIL);
+	print "$code_filename written\n";
+    }
+    print "$header_filename written\n";
+    print "$enum_filename written\n";
+    print "$map_filename written\n";
+}
+
+# verilog header print routine
+
+sub print_verilog_header {
+
+    $nowstring =   localtime;
+    # open output file
+
+    open (HEADFIL, "> $verilog_header_filename") or die "Error opening $verilog_header_filename\n";
+    print HEADFIL "//\$Id\$\n// Verilog Headers generated by RegMaker.pl $nowstring\n";
+
+    foreach $sechead (@seclist) {
+	if ($sechead ne "NULL") {
+	    print HEADFIL "\n\n\// Section: $sechead \n";
+	}
+	foreach $adr (@_) {
+	    $skey =  $adr . "_SECTION";
+	    $nrkey = $adr . "_NOREG";
+	    $noreg=0;#$data{$nrkey}; matter of taste 1/20/15
+	    if ($noreg == 0) {
+		$wid = $sbmsb+1;
+		@addrs = adr_expand($adr,1);
+		foreach $ade (@addrs) {    
+		    $usename = $nname{$ade};  
+		    if ($wid <5)  {$padr = sprintf("%01x",$ade);}
+		    elsif ($wid <9)  {$padr = sprintf("%02x",$ade);}
+		    elsif ($wid <13) {$padr = sprintf("%03x",$ade);}
+		    elsif ($wid <17) {$padr = sprintf("%04x",$ade);}
+		    elsif ($wid <21) {$padr = sprintf("%05x",$ade);}
+		    elsif ($wid <25) {$padr = sprintf("%06x",$ade);}
+		    elsif ($wid <29) {$padr = sprintf("%07x",$ade);}
+		    else             {$padr = sprintf("%08x",$ade);}
+		    
+		    if ($data{$skey} eq $sechead) {
+			print HEADFIL "    parameter ADDR_"."$usename = ".$wid."'h".$padr.";\n";
+			if ($enable_rwmask == 1) {
+			    $actstr = gen_reg_masks($adr,1);
+			    print HEADFIL "    parameter $usename"."_RWMASK = ".$wid."'h".$actstr.";\n";
+			}
+		    }
+		}
+	    }
+	}
+    }
+    close (HEADFIL);
+    print "$verilog_header_filename written\n";
+}
+
+# tcl header print routine
+
+sub print_tcl_header {
+
+    $nowstring =   localtime;
+    # open output file
+
+    open (HEADFIL, "> $tcl_header_filename") or die "Error opening $tcl_header_filename\n";
+    print HEADFIL "\# Tcl Headers generated by RegMaker.pl $nowstring\n";
+
+    foreach $sechead (@seclist) {
+	if ($sechead ne "NULL") {
+	    print HEADFIL "\n\n\# Section: $sechead \n";
+	}
+	foreach $adr (@_) {
+	    $skey =  $adr . "_SECTION";
+	    $wid = $sbmsb+1;
+	    @addrs = adr_expand($adr,1);
+	    foreach $ade (@addrs) {    
+		$usename = $nname{$ade};  
+		$padr = sprintf("%x",$ade * $display_factor);
+		if ($data{$skey} eq $sechead) {
+		    print HEADFIL "    set addr_".lc($usename)." 0x$padr\n";
+		}
+	    }
+	}
+    }
+    close (HEADFIL);
+    print "$tcl_header_filename written\n";
+}
+
+sub print_register_test {
+
+    $nowstring =   localtime;
+
+    # some stella sequencer registers have section specific definitions
+ 
+    # START PROJECT-SPECIFIC CODE
+    $special{"0xfff00080"} = "0xff"; # spi control reg is funky - RO "1" in the middle
+  
+    # because different sequencers have different reg widths
+    # but there's a common regmaker file
+    $special{"0xa11"} = "0xe3" ;
+    $special{"0xa91"} = "0xe1" ;
+    $special{"0xb11"} = "0xe3" ;
+    $special{"0xb91"} = "0xe1" ;
+    $special{"0xf00"} = "0x3ff" ;
+    $special{"0xf01"} = "0x3ff" ;
+    $special{"0xf02"} = "0x3ff" ;
+    $special{"0xf11"} = "0xe1" ;
+    $special{"0xdf00"} = "0x1ff" ;
+    $special{"0xdf01"} = "0x1ff" ;
+    $special{"0xdf02"} = "0x1ff" ;
+    $special{"0xdf03"} = "0xff" ;
+    $special{"0xdf11"} = "0x1" ;
+    $special{"0xdf2e"} = "0x1ff" ;
+    $special{"0xdf2f"} = "0x0" ;
+    $special{"0xe300"} = "0x3ff" ;
+    $special{"0xe301"} = "0x3ff" ;
+    $special{"0xe302"} = "0x3ff" ;
+    $special{"0xe311"} = "0xe1" ;
+    $special{"0xe700"} = "0x3ff" ;
+    $special{"0xe701"} = "0x3ff" ;
+    $special{"0xe702"} = "0x3ff" ;
+    $special{"0xe711"} = "0xe7" ;
+    $special{"0xeb00"} = "0x3ff" ;
+    $special{"0xeb01"} = "0x3ff" ;
+    $special{"0xeb02"} = "0x3ff" ;
+    $special{"0xeb11"} = "0xe7" ;
+    $special{"0xef00"} = "0x3ff" ;
+    $special{"0xef01"} = "0x3ff" ;
+    $special{"0xef02"} = "0x3ff" ;
+    $special{"0xef11"} = "0xe7" ;
+    $special{"0xf300"} = "0x3ff" ;
+    $special{"0xf301"} = "0x3ff" ;
+    $special{"0xf302"} = "0x3ff" ;
+    $special{"0xf311"} = "0xe7" ;
+    $special{"0xf700"} = "0x1ff" ;
+    $special{"0xf701"} = "0x1ff" ;
+    $special{"0xf702"} = "0x1ff" ;
+    $special{"0xf703"} = "0xff" ;
+    $special{"0xf711"} = "0x1" ;
+    $special{"0xfb00"} = "0x1ff" ;
+    $special{"0xfb01"} = "0x1ff" ;
+    $special{"0xfb02"} = "0x1ff" ;
+    $special{"0xfb03"} = "0xff" ;
+    $special{"0xfb11"} = "0x1" ;
+
+    @rt_excludes = ("MU1","MU2","MU3","MU4","MU5","MU6","MU7","MU8");
+    $mopen=0;
+
+    # END PROJECT-SPECIFIC CODE
+
+    # open output file
+
+    open (HEADFIL, "> $register_test_filename") or die "Error opening $register_test_filename\n";
+    print HEADFIL "//\$Id\$\n// Verilog Test Code generated by RegMaker.pl $nowstring\n";
+
+    foreach $adr (@_) {
+	# exclude memories
+	$mkey = $adr . "_MEMORY";
+	if (defined($data{$mkey})) {next;}
+	
+	$nrgkey = $adr . "_NOREGTEST";
+	if (defined($data{$nrgkey})) {next;}
+	
+	$nrwkey = $adr . "_NORWTEST";
+	
+	# filter out excludes
+	$nkey = $adr . "_NAME";
+	$nxt=0;
+	foreach $str (@rt_excludes) {
+	    if (uc($data{$nkey}) =~ $str) {
+		$nxt=1;
+		last;
+	    }
+	}
+	if ($nxt==1) {next;}
+
+	# START PROJECT-SPECIFIC CODE
+	# segregate Synopsys MCTL
+	$mctl=0;
+	if (($data{$nkey} =~ /^MCTL/) &&
+	    ($data{$nkey} !~ "MCTL_STATUS") &&
+	    ($data{$nkey} !~ "MCTL_CONFIG")) {
+	    $mfilename = "mem_".$register_test_filename;
+	    if ($mopen==0) {
+		open (HEADFIL2, "> $mfilename") or die "Error opening $mfilename\n";
+		print HEADFIL2 "//\$Id\$\n// Verilog Test Code generated by RegMaker.pl $nowstring\n";
+		$mopen=1;
+	    }
+	    $mctl=1;
+	} 
+	# END PROJECT-SPECIFIC CODE
+
+	# get relevant keys
+	$rkey = $adr . "_RESET";
+	$rwkey = $adr . "_RWTYPE";
+	
+	$rwtype = $data{$rwkey};
+
+	# separate test for this
+	if (uc($data{$nkey}) =~ "ICACHECONFIG_REG") {
+	    $rwtype = "RO";
+	}
+
+	# format reset value
+	$rval = $data{$rkey};
+	if ($rval =~ "0x") {$rval = substr($rval,2);}
+	$rvalf = "0x".$rval;
+	
+	@addrs = adr_expand($adr,1);
+	foreach $ade (@addrs) {    
+
+	    # format address
+	    $adex = "0x".sprintf("%x",$ade);
+
+	    # START PROJECT-SPECIFIC CODE
+	    # stella 0 only
+	    $aderaw = substr($adex,2);
+	    if ((substr($aderaw,0,4) eq "fff5") &&
+		(substr($aderaw,4,1) ne "0")) {next;}
+	    # END PROJECT-SPECIFIC CODE
+
+	    # read reset value for everything
+	    if (($rwtype eq "RO") ||
+		($rwtype eq "RW") ||
+		($rwtype eq "W1C")) {
+		if ($mctl==0) {
+		    push @resets, "\nif (debug ==1) printf(\"\\nTesting Reset for $data{$nkey}, Addr = $adex, Data = $rvalf ($rwtype)\\n\");\n";
+		    push @resets, "do_read0 ($adex,$rvalf,0xffffffff);\n";
+		} else {
+		    push @mresets, "\nif (debug ==1) printf(\"\\nTesting Reset for $data{$nkey}, Addr = $adex, Data = $rvalf ($rwtype)\\n\");\n";
+		    push @mresets, "do_read0 ($adex,$rvalf,0xffffffff);\n";
+		}
+	    }
+	    # If RW write/read inverse of reset value
+	    if (($rwtype eq "RW") && (!(defined($data{$nrwkey})))) {
+
+		# generate 1s mask - inverse of reset
+		$rval2 = substr("00000000",0,8-length($rval)).$rval;
+		$ones="";
+		for ($x=0;$x<8;$x++) {
+		    $loc = index("FEDCBA9876543210",uc(substr($rval2,$x,1)));
+		    $ones= $ones . sprintf("%1x",$loc);
+		}
+		$ones = "0x".$ones;
+		$actstr = gen_reg_masks($adr,1);
+		$actstrh = "0x".$actstr;
+		# $mctl== 1 is PROJECT-SPECIFIC
+		if ($mctl == 0) {
+		    push @rwtest, "\nif (debug==1) printf(\"\\nTesting R/W for $data{$nkey}, Addr = $adex, ($rwtype, $actstr)\\n\");\n";
+		    push @rwtest, "do_write0($adex,$ones);\n";
+		} else {
+		    push @mrwtest, "\nif (debug==1) printf(\"\\nTesting R/W for $data{$nkey}, Addr = $adex, ($rwtype, $actstr)\\n\");\n";
+		    push @mrwtest, "do_write0($adex,$ones);\n";
+		}
+		# generate read value - AND write value with rwmask
+		$actstrb = dec2bin(hex($actstr));
+		$onesb   = dec2bin(hex($ones));
+		$teststrb = "";
+		for ($x=0;$x<32;$x++) {
+		    if ((substr($actstrb,$x,1)==1) && (substr($onesb,$x,1)==1)) {
+			$teststrb = $teststrb . "1";
+		    } else {
+			$teststrb = $teststrb . "0";
+		    }
+		}
+		$teststr = bin2dec($teststrb);
+		$teststr = "0x".sprintf("%08x",$teststr);
+
+		# PROJECT-SPECIFIC CODE
+		if (defined($special{$adex})) {$teststr = $special{$adex};}
+
+		# $mctl== 1 is PROJECT-SPECIFIC
+		if ($mctl == 0) {
+		    push @rwtest, "do_read0 ($adex,$teststr,$actstrh);\n";
+		    push @rwtest, "do_write0($adex,$rvalf);\n";
+		    push @rwtest, "do_read0 ($adex,$rvalf,$actstrh);\n";
+		} else {
+		    push @mrwtest, "do_read0 ($adex,$teststr,$actstrh);\n";
+		    push @mrwtest, "do_write0($adex,$rvalf);\n";
+		    push @mrwtest, "do_read0 ($adex,$rvalf,$actstrh);\n";
+		}
+	    }
+	}
+    }
+    # START PROJECT-SPECIFIC CODE
+    if ($mopen==1) {
+    foreach $line (@mresets) {print HEADFIL2 "$line";}
+    foreach $line (@mrwtest) {print HEADFIL2 "$line";}
+	close (HEADFIL2);
+	print "$mfilename written\n";
+    }
+    # END PROJECT-SPECIFIC CODE
+    foreach $line (@resets) {print HEADFIL "$line";}
+    foreach $line (@rwtest) {print HEADFIL "$line";}
+    close (HEADFIL);
+    print "$register_test_filename written\n";
+}
+
+
+
+# verilog print routine
+
+sub print_verilog {
+
+    @decodelines=();
+    $case_lsb = 0;
+    $ai8 = $addr_incr * 8;
+    $aim = $ai8 - 1;
+  
+    $modname = $verilog_filename;
+    $slash = index($modname,"/");
+    while ($slash >= 0) {
+	$modname = substr($modname,$slash+1);
+	$slash = index($modname,"/");
+    }
+
+    $dot = index($modname,".");
+    $modname = substr($modname,0,$dot);
+
+    push @declines,"// \$Id\$\n// This file was generated by regmaker.pl\n\n";
+    push @declines, "module $modname (\n";
+
+    if (defined($global{"writeout"})) {
+	push @declines, "    output [$dmsb:0] latched_write_data,\n";
+    }
+
+    # reads header
+    push @readlines, "// Reads...\n";
+    if (($no_reg_pipe == 0) && ($no_read_pipe == 0)) {
+	push @readlines, "always @(posedge $regclk or negedge $reg_rst_l) begin \n";
+	push @readlines, "   if (!$reg_rst_l) read_data_1 <= 0;\n";
+	push @readlines, "   else begin\n";
+	push @readlines, "       if (read_1) begin\n";
+    } else {
+	push @readlines,"       always @* begin\n";
+    }
+    push @readlines,    "           case(addr_1[$bmsb:$case_lsb])\n";
+    # resets header
+    if ($no_reg_pipe == 0) {
+	push @resetlines0, "reg [$bmsb:0] addr_1;\n";
+	push @resetlines0, "reg [$dmsb:0] write_data_1, read_data_1;\nreg read_1, write_1;\n\n";
+    } else {
+	push @resetlines0, "wire [$bmsb:0] addr_1;\n";
+	push @resetlines0, "wire [$dmsb:0] write_data_1;\n";
+	push @resetlines0, "reg  [$dmsb:0] read_data_1;\nwire read_1, write_1;\n\n";
+    }
+
+    if (defined($global{"writeout"})) {
+	push @resetlines0, "assign latched_write_data = write_data_1;\n\n";	
+    }
+    if ($no_reg_pipe == 1) {
+	push @resetlines0, "assign addr_1       = addr;\n";
+	push @resetlines0, "assign write_data_1 = write_data;\n";
+	push @resetlines0, "assign write_1      = write;\n";
+	push @resetlines0, "assign read_1       = read;\n";
+    }
+    if (($no_reg_pipe == 1) || ($no_read_pipe == 1)) {
+	push @resetlines0, "assign read_data    = read_data_1;\n";
+    }
+    if (($no_read_pipe == 0) && ($no_reg_pipe == 0)) {
+	push @resetlines, "\n// read data is available in the 1st cycle after addr is applied\n";
+	push @resetlines, "// write data is available 2 cycles after addr is applied\n\n";
+	$esym = "<=";
+    } elsif (($no_read_pipe == 1) && ($no_reg_pipe == 0)) {
+	push @resetlines, "\n// read data is available in the same cycle as when addr is applied\n";
+	push @resetlines, "// write data is available 2 cycles after addr is applied\n\n";
+	$esym = "=";
+    } else {
+	push @resetlines, "\n// read data is available in the same cycle as when addr is applied\n";
+	push @resetlines, "// write data is available 1 cycle after addr is applied\n\n";
+	$esym = "=";
+    }
+    push @resetlines, "always @(posedge $regclk or negedge $reg_rst_l) begin\n";
+    push @resetlines, "    if (!$reg_rst_l) begin\n";
+    if ($no_reg_pipe == 0) {
+	push @resetlines, "        addr_1       <= 0;\n";
+	push @resetlines, "        write_data_1 <= 0;\n";
+	push @resetlines, "        read_1       <= 0;\n";
+	push @resetlines, "        write_1      <= 0;\n";
+    }
+    if (($no_reg_pipe == 0) && ($no_read_pipe == 0)) {
+	push @resetlines, "        read_data    <= 0;\n";
+    }
+    # writes header
+    push @writelines, "    end\n";
+    push @writelines, "    else begin\n";
+    if ($no_reg_pipe == 0) {
+	push @writelines, "      addr_1       <= addr;\n";
+	push @writelines, "      write_data_1 <= write_data;\n";
+	push @writelines, "      write_1      <= write;\n";
+	push @writelines, "      read_1       <= read;\n";
+    }
+    if (($no_reg_pipe == 0) && ($no_read_pipe == 0)) {
+	push @writelines, "      read_data    <= read_data_1;\n";
+    }
+    push @writelines, "\n      if (write_1) begin\n";
+    push @writelines, "        case(addr_1[$bmsb:$case_lsb])\n";
+
+    # go through all addresses
+    foreach $adr (@_) {
+	
+	$nvkey = $adr . "_NOVERILOG";
+	$vvkey = $adr . "_VERILOG";
+
+	if (($data{$vvkey} == 0) &&  # skip only if VERILOG=0
+	    (($noverilog==1) ||      # then ok to skip if global nover=1
+	     ($data{$nvkey} == 1))) # or local nover = 1
+	{
+	    next;
+	}
+
+	$nrkey = $adr . "_NOREG";
+	$noreg=$data{$nrkey};
+
+	# generate enumerated address list...
+	@alist=();
+	$adrcnt = 1;
+	
+	# generate keys
+	$nakey = $adr . "_NEXTADDR";
+	$stkey = $adr . "_STARTADDR";
+	$eakey = $adr . "_ENDADDR";
+	$vnkey = $adr . "_VNAME";
+	$bskey = $adr . "_BASEADDR";
+	$ofkey = $adr . "_BASEOFF";
+
+	$baseaddr = sprintf("%x",hex($data{$bskey}) + hex($data{$ofkey}));
+	
+	# the main address
+	push @alist, $adr;
+	$name{$adr} = $data{$vnkey};
+	$base{$adr} = $adr;
+	
+	$btkey = $base{$adr} . "_BITFIELDS";
+	# determine register size
+	if (!(defined(${$data{$btkey}}[0]))) {
+	    print "Error: no bit fields defined for register at address $adr.\n";
+	    exit;
+	}
+
+
+	$msbfield = (${$data{$btkey}}[0]);
+	@bits = split "_",$msbfield;
+	$msb = $bits[0];
+
+	$reg_width = int($msb/(8 * $addr_incr))+1;
+
+	# is there an ENDADDR for ADDR? If so, fill range
+	if (defined($data{$eakey})) {
+
+	    # tmp addr is a number
+	    if ($reg_width > $addr_incr) {
+		$incr_addr = $reg_width;
+	    } else {
+		$incr_addr = $addr_incr;
+	    }
+	    $tmp_addr = hex($adr)+$incr_addr;
+	    # copy the endaddress list to a tmp list for easier manipulation
+	    @eatmp = ();
+	    foreach $eaddr (@{$data{$eakey}}) {
+		push @eatmp, $eaddr;
+	    }
+
+	    # pointer into endaddress list
+	    $ea=0;
+
+	    # enumarate addresses in range
+	    while ($tmp_addr <= hex($eatmp[$ea])) {
+
+		if ($tmp_addr + $addr_incr >  (1+hex($eatmp[$ea]))) {
+		    printf ("Error: Register starting at address 0x%X runs past specified ENDADDR (%d %d %d) \n",$tmp_addr,$tmp_addr,$addr_incr,hex($eatmp[$ea]));
+		    exit;
+		}
+
+		# convert number back to address string
+		$hexaddr = sprintf("%02X",$tmp_addr);
+
+		# add to list
+		push @alist, $hexaddr;
+		# record information from the base address it's derived from
+		$name{$hexaddr} = $data{$vnkey} . "_i" . $adrcnt;
+		$base{$hexaddr} = $adr;
+		$adrcnt++;
+
+		$tmp_addr = $tmp_addr+$incr_addr;
+	    }
+	}
+	
+	# process STARTADDR ranges
+	if (defined($data{$stkey})) {
+	    foreach $st_addr (@{$data{$stkey}}) {
+
+		# pointer into endaddress list
+		$ea++;
+		
+		# convert to number
+		$tmp_addr = hex($st_addr);
+
+		# enumarate addresses in range
+		while ($tmp_addr <= hex($eatmp[$ea])) {
+		
+		    if ($tmp_addr + $addr_incr >  hex($eatmp[$ea])) {
+			printf ("Error: Register starting at address 0x%X runs past specified ENDADDR\n",$tmp_addr);
+			exit;
+		    }
+
+		    # same code as above
+		    $hexaddr = sprintf("%02X",$tmp_addr);
+		    push @alist, $hexaddr;
+		    $name{$hexaddr} = $data{$vnkey} . "_i" . $adrcnt;
+		    $base{$hexaddr} = $adr;
+		    $adrcnt++;
+		    $tmp_addr = $tmp_addr+$incr_addr;
+		}
+	    }
+	}
+	
+	# enumerate NEXTADDR values in a similar fashion
+	if (defined($data{$nakey})) {
+	    foreach $tmp_addr (@{$data{$nakey}}) {
+		push @alist, $tmp_addr;
+		$name{$tmp_addr} = $data{$vnkey} . "_i" . $adrcnt;
+		$base{$tmp_addr} = $adr;
+		$adrcnt++;
+	    }
+	}
+	
+	# sort the list of addresses
+
+	%sa = ();
+	@adlist=();
+	foreach $entry (@alist) {
+	    push @adlist,hex($entry);
+	    $sa{hex($entry)} = $entry;
+	}
+
+
+	@sadlist = sort {$a <=>  $b} @adlist;
+
+	# now iterate on the sorted list
+	
+	foreach $entry (@sadlist) {
+
+	    $addr = $sa{$entry};
+
+	    $rwkey = $base{$addr} . "_RWTYPE";
+	    $btkey = $base{$addr} . "_BITFIELDS";
+	    $nkey  = $base{$addr} . "_NAME";
+	    $bskey = $base{$addr} . "_BASEADDR";
+	    $ofkey = $base{$addr} . "_BASEOFF";
+	    $deckey= $base{$addr} . "_DECODE";
+	    $dcokey= $base{$addr} . "_DECOFF";
+	    $dcekey= $base{$addr} . "_DECEARLY";
+
+	    $baseaddr = sprintf("%x",hex($data{$bskey}) + hex($data{$ofkey}));
+
+	    # generate case address
+	    $case_addr = hex($addr);
+	    $case_addr_txt = gen_case($case_addr,$bmsb,0,$baseaddr);
+
+	    # for decode...
+	    if (defined($data{$dcokey})) {
+		$dec_addr = hex($addr) + $data{$dcokey};
+		$dec_addr_txt = gen_case($dec_addr,$bmsb,0,$baseaddr);
+	    } else {
+		$dec_addr_txt = $case_addr_txt;
+	    }
+
+	    # get number of bit fields
+	    $multnames = $#{$data{$btkey}};
+	
+#	    print "$adr $addr $case_addr @{$data{$btkey}}\n";
+
+	    # open case for writes
+	    if (($noreg == 0) && ($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {
+
+		push @writelines, "            $case_addr_txt begin  // $data{$nkey}\n";
+		$ca_wlast = $case_addr;
+	    }
+
+	    # iterate on bit ranges
+	    foreach $bf (@{$data{$btkey}}) {
+
+		# generate sub-register name
+		$regname = $name{$addr};
+		if ($multnames > 0) {
+		    $regname = $regname . "_b" . $bf;
+		}
+		$bfc = $bf;
+		$bfc =~ tr/\_/\:/;
+
+		$bfc = "[".$bfc."]";
+
+		if ($bfc !~ ":") {
+		    $bfc = "";
+		}
+
+		# print declaration
+		if ($noreg == 0) {
+		    if (($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {
+			push @declines, "    output reg $bfc $regname, // $data{$nkey} \n";
+		    } else {
+			push @declines, "    input $bfc $regname, // $data{$nkey} \n";
+		    }
+		}
+
+		# generate decodes
+		if (defined($data{$deckey})) {
+		    push @declines,"    output $regname"."_".lc($data{$deckey})."decode, // $data{$nkey} \n";
+		    $tadr = "_1";
+		    if ($data{$deckey} eq "W") {
+			$trig = "&& write_1";
+		    } elsif ($data{$deckey} eq "R") {
+			if (defined($data{$dcekey})) {
+			    $trig = "&& read";
+			    $tadr = "";
+			} else {
+			    $trig = "&& read_1";
+			}
+		    } else {
+			$trig = "";
+		    }
+
+		    push @decodelines,"assign $regname"."_".lc($data{$deckey})."decode = (addr".$tadr." == ",substr($dec_addr_txt,0,-1).") $trig;\n";
+		}
+
+		if ($noreg ==1) {last;}
+
+		@subs = split "_", $bf;
+
+		$resetval = gen_reset($base{$addr},@subs);
+
+		if (($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {
+		    if ($resetval ne "undefined") {
+			push @resetlines, "        $regname <= $resetval; // $data{$nkey} \n";
+		    } else {
+			push @resetlines, "//      $regname <= undefined;    $data{$nkey} \n";
+		    }
+		}
+		if ($data{$rwkey} eq "WO") {
+		    push @clrlines, "      $regname <= $resetval; // $data{$nkey} (WO) \n";
+		}
+		# generate write lines
+		if (($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {
+
+		    # determine MSB and LSB of register (MSB=LSB for 1 bit)
+
+		    $msb = $subs[0];
+		    $lsb = $msb;
+		    if ($#subs != 0) {
+			$lsb = $subs[1];
+		    }
+		    for ($xh=$aim; $xh >= $aim; $xh= $xh-$ai8) {
+
+			# xl is bottom of current range, xh is top
+			$xl = $xh-$aim;
+			
+#			print "\n$msb $lsb $xh $xl |@{$data{$btkey}})|@subs|";
+			if ($bugck == 1) {
+			    printf ("Warning, you stumbled upon a tool bug for addr %x. See comment at top of script\n",$ca);
+			}
+			$bugck = 1;
+
+			if ((($xh >= $msb) && ($msb >= $xl)) ||  # if reg MSB is in this byte
+			    (($xh <= $msb) && ($lsb <= $xl)) ||  # or reg MSB is above this byte, and reg LSB is below it
+			    (($xh >= $lsb) && ($lsb >= $xl)) ) { # or reg LSB is in the byte
+#			    print "ok";
+			    $bugck=0;
+			    # generate write statement
+			    $wrok=0;
+			    if (($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {$wrok=1;}
+			    $ca = $case_addr-$addr_incr;
+			    if ($msb >= 0) {
+				if ($bige==0) {
+				    $a=$aim;$c=$ai8;
+				} else {
+				    $a=-1;
+				    while ($a<$msb) {$a=$a+$ai8;}
+				    $c=-1 * $ai8;
+				}
+				for ($r=$a; ($bige) ? ($r > 0) : ($r< $msb+$ai8); $r=$r+$c) {
+				    $ca= $ca+$addr_incr;
+				    $ca_txt = gen_case($ca,$bmsb,0,$baseaddr);
+				    if ((($bige==1) &&  ($wrok && ($r<$msb))) ||
+					(($bige==0) &&  ($wrok && ($r>$aim)))) {  
+					push @writelines, "            end\n";
+					push @writelines, "            $ca_txt begin  // $data{$nkey}\n";
+				    }
+				    $e=0;
+				    while ($e<=$r) {$e=$e+$ai8;}
+				    $e=$e-$ai8;
+				    if ($bige) {
+					$rl=$e;
+				    } else {
+					$rl = $r-$aim;
+				    }
+				    $ranget = min($r,$msb);   # high bit of reg is min of range top or msb
+				    $rangeb = max($rl,$lsb);   # low  bit of reg is max of range bot or lsb
+				    
+				    if ($ranget == $rangeb) {  # generate range string - single bit if appropriate
+					$range = $ranget;
+				    } else {
+					$range = $ranget . ":" . $rangeb;
+				    }
+				    while ($ranget > $aim) {$ranget = $ranget-$ai8;}
+				    while ($rangeb > $aim) {$rangeb = $rangeb-$ai8;}
+				    if ($ranget == $rangeb) {  # generate range string - single bit if appropriate
+					$drange = $ranget;
+				    } else {
+					$drange = $ranget . ":" . $rangeb;
+				    }
+				    if ($wrok) {
+					if ($range eq "0") {
+#					    if ($data{$rwkey} ne "W1C") {
+						push @writelines, "                $regname <= write_data_1\[$drange\];\n";
+#					    } else {
+#						push @writelines, "                $regname <= $regname  & ~write_data_1\[$drange\];\n";
+#					    } 
+					} else {
+#					    if ($data{$rwkey} ne "W1C") {
+						push @writelines, "                $regname\[$range\] <= write_data_1\[$drange\];\n";
+#					    } else {
+#						push @writelines, "                $regname\[$range\] <= $regname\[$range\] & ~write_data_1\[$drange\];\n";
+#					    }
+					}
+				    }
+				}
+			    }
+			}
+		    }
+		}
+	    }
+            
+	    if ($noreg ==1) {last;}
+	    # close begin/end block for writes
+	    if (($data{$rwkey} ne "RO") && ($data{$rwkey} ne "W1C")) {
+		push @writelines, "            end\n";
+	    }
+	
+	    #process reads
+	    if (($data{$rwkey} ne "WO") &&
+		($data{$rwkey} ne "NA")) {
+
+		# first, make up a mask of all the used bits
+		$multnames = $#{$data{$btkey}};
+		$smask="";
+		for ($k=0;$k<$maxwid;$k++) {
+		    $smask = $smask . "0";
+		}
+
+		# reverse bits for reads, lsb to msb
+		@bts = reverse @{$data{$btkey}};
+		$max=0;
+		foreach $bf (@bts) {
+		    @subs = split "_",$bf;
+		    if ($#subs == 0) {
+			substr($smask,$subs[0],1) = "1";
+			$max = $subs[0];
+		    } else {
+			for ($x=$subs[1];$x<=$subs[0];$x++) {
+			    substr($smask,$x,1) = "1";
+			    $max = $subs[0];
+			}
+		    }
+		}
+
+		# ca is start address
+		$ca = $case_addr;
+		$ca_txt = gen_case($ca,$bmsb,0,$baseaddr);
+		push @readlines,"              " . $ca_txt . " begin // $data{$nkey}\n";
+		if ($ca  < $ca_rlast + $addr_incr) {
+		    printf ("Error: ADDR %x overlaps with ADDR %x.  Cannot write verilog (0).\n",$ca_rlast,$ca);
+		    return();
+		}
+		$ca_rlast = $ca;
+		# tmsb is the MSB of the top word that this register spans
+		$tmsb = 0;
+		while ($tmsb <= $max) {
+		    $tmsb = $tmsb + ($addr_incr*8);
+		}
+		# loop through 1 reg at a time
+		if ($bige) {
+		    $a = $tmsb-$ai8;
+		    $c=-1 * $ai8;
+		} else {
+			$a=0;
+			$c=$ai8;
+		}
+		for ($x=$a;  ($bige) ? ($x>=0) : ($x<$tmsb); $x=$x+$c) {
+
+		    $rdline = "                read_data_1 $esym {";
+		    $msb = $x + ($addr_incr*8) ;
+		    $act = 0;
+		
+		    # go from msb to lsb
+		    for ($bpos = $msb-1; $bpos >= $x; $bpos--) {
+			
+			# now parsing active bits
+			if (($act == 0) && (substr($smask,$bpos,1) eq "1")) {
+			    $sbit = $bpos;
+			    $act = 1;
+			    if ($msb > $bpos + 1) {
+				$zeroes = $msb - ($bpos+1);
+				$rdline = $rdline . $zeroes . "\'h";
+				while ($zeroes > 0) {
+				    $rdline = $rdline . "0";
+				    $zeroes = $zeroes -4;
+				}
+				$rdline = $rdline . ",";
+			    }
+			}
+			
+			# end of active bit parsing (was elsif)
+			if (($act == 1) && ((substr($smask,$bpos,1) eq "0") || ($bpos == $x))) {
+			    if (($bpos != $x) || (substr($smask,$bpos,1) eq "0") ) {
+				$spos = $bpos + 1;
+			    } else {
+				$spos = $bpos;
+			    }
+			    $regname = $name{$addr};
+#			    if ($sbit == $spos) {
+			    if ($sbit == 0) {
+				if ($multnames > 0) {
+				    $regname = $regname . "_b" . $sbit;
+				}
+				$rdline = $rdline . $regname . ",";
+			    } elsif ($sbit == $spos) {
+				if ($multnames > 0) {
+				    $regname = $regname . "_b" . $sbit . "_" . $spos;
+				}
+				$rdline = $rdline . $regname . "[" . $sbit .  "],";
+			    } else {
+				if ($multnames > 0) {
+				    $regname = $regname . "_b" . $sbit . "_" . $spos;
+				}
+				$rdline = $rdline . $regname . "[" . $sbit . ":" . $spos . "],";
+			    }
+			    $act = 0;
+			    $msb = $spos;
+			}
+
+			# done with this reg word
+			if (($act == 0) && ($bpos == $x)) {
+			    if ($msb > $x) {
+				$zeroes = $msb - $x;
+				$rdline = $rdline . $zeroes . "\'h";
+				while ($zeroes > 0) {
+				    $rdline = $rdline . "0";
+				    $zeroes = $zeroes -4;
+				}
+			    }
+			}
+		    }
+
+		    # get rid of extra comma
+		    if (substr($rdline,$#rdline,1) eq ",") {
+			$rdline = substr($rdline,0,$#rdline);
+		    }
+		    # finish line
+		    $rdline = $rdline . "};\n";
+		    push @readlines, $rdline;
+		    push @readlines, "              end\n";
+
+		    # start next line if needed
+		    if ((($bige == 0) && (($x + $ai8) < $tmsb)) ||
+			(($bige == 1) && (($x + $ai8) > $ai8    ))) {
+			$ca= $ca + $addr_incr;
+			$ca_txt = gen_case($ca,$bmsb,0,$baseaddr);
+			push @readlines,"              " . $ca_txt . " begin // $data{$nkey}\n";
+			if ($ca  < $ca_rlast + $addr_incr) {
+			    printf ("Error: ADDR %x overlaps with ADDR %x.  Cannot write verilog. (1)\n",$ca_rlast,$ca);
+			    return();
+			}
+			$ca_rlast = $ca;
+		    }
+		}
+	    }
+	}
+    }
+    # terminate case statemente
+    $cxt = 8 * $addr_incr;
+    if ($cxt == 32) {
+	push @readlines,  "              default: read_data_1 $esym {16'h".$deadstr.",addr_1[15:0]};\n";
+    } elsif ($cxt == 16) {
+	push @readlines,  "              default: read_data_1 $esym {8'h".substr($deadstr,0,2).",addr_1[7:0]};\n";
+    } else {
+	push @readlines,  "              default: read_data_1 $esym $cxt"."'h0;\n";
+    }
+    push @readlines,  "          endcase\n";
+    push @readlines,  "      end\n";
+    if (($no_read_pipe==0) && ($no_reg_pipe == 0)) {
+	push @readlines,  "   end\nend\n\n";
+    }
+    push @writelines, "        endcase\n    end\n";
+    if ($#clrlines > -1) {
+	push @writelines, "    else begin\n";
+	push @writelines, @clrlines;
+	push @writelines, "    end\n";
+    }
+    push @writelines, "  end\n";
+    push @writelines, "end\n";
+
+
+    # open output file
+    open (VFIL, "> $verilog_filename") or die "Error opening $verilog_filename\n";
+
+    push @declines, "\n    input      [$dmsb:0] write_data,\n";
+    push @declines,   "    input      [$bmsb:0] addr,\n";
+    if (($no_read_pipe==0) && ($no_reg_pipe == 0)) {
+	push @declines,   "    output reg [$dmsb:0] read_data,\n";
+    } else {
+	push @declines,   "    output     [$dmsb:0] read_data,\n";
+
+    }
+    push @declines,   "    input write,\n";
+    push @declines,   "    input read,\n";
+    push @declines,   "    input $regclk,\n";
+    push @declines,   "    input $reg_rst_l\n";
+    push @declines,   "     );\n\n";
+    push @decodelines, "\n";
+    # print declarations
+    foreach $line (@declines) {
+	print VFIL $line;
+    }
+
+    # print resets
+    foreach $line (@resetlines0) {
+	print VFIL $line;
+    }
+
+    # print decodes
+    foreach $line (@decodelines) {
+	print VFIL $line;
+    }
+
+    # print resets
+    foreach $line (@resetlines) {
+	print VFIL $line;
+    }
+
+    # print writes
+    foreach $line (@writelines) {
+	print VFIL $line;
+    }
+
+    # print reads
+    foreach $line (@readlines) {
+	print VFIL $line;
+    }
+    print VFIL "\nendmodule\n";
+    close(VFIL);
+    print "$verilog_filename written\n";
+}
+
+
+
+# Source print routine
+
+sub print_source {
+
+    # open output file
+    open (DATAFIL, "> $source_filename") or die "Error opening $source_filename\n";
+    foreach $sechead (@seclist) {
+	foreach $adr (@_) {
+	    $skey = $adr . "_" . "SECTION";
+	    if ($data{$skey} eq $sechead) {
+		print DATAFIL "\nADDR $adr\n";
+		foreach $keyw (@keywords) {
+		    $key = $adr . "_" . $keyw;
+		    if (defined($data{$key})) {
+
+			if (lsearch($keyw,@commented_on_output) == 1) {
+			    $okey = "\# $keyw";
+			} else {
+			    $okey = "$keyw";
+			}
+
+			if ($keyw eq "BIT") {
+			    foreach $sb (@{$data{$key}}) {
+				$bitkey = $key . "_" . $sb;
+				$rwkey = $bitkey . "_" . "RW";
+				print DATAFIL "BIT $sb";
+				if (defined($data{$rwkey})) {
+				    print DATAFIL " $data{$rwkey}";
+				}
+				print DATAFIL "\n";
+				foreach $des (@{$data{$bitkey}}) {
+				    print DATAFIL "$des\n";
+				}
+			    }
+			} elsif ($keyw eq "REGDES") {
+			    print DATAFIL "REGDES\n";
+			    foreach $des (@{$data{$key}}) {
+				print DATAFIL "$des\n";
+			    }
+			    print DATAFIL "END\n";
+			} elsif (lsearch($keyw,@simple_list) == 1) {
+			    print DATAFIL "$okey ";
+			    foreach $tkn (@{$data{$key}}) {
+				print DATAFIL "$tkn ";
+			    }
+			    print DATAFIL "\n";
+			} elsif ($keyw eq "BASEADDR") {
+			    next;
+			} else {
+			    $tmp = $data{$key};
+			    if (($keyw_len{$keyw} > 0) || ($tmp ne "0")) {
+				print DATAFIL "$okey $tmp\n";
+			    }
+			}
+		    }
+		}
+	    }
+	}
+    }
+    close (DATAFIL);
+    print "$source_filename written\n";
+}
+
+sub do_processing {
+
+    @namelist = ();
+    foreach $adr (@_) {
+	$fkey  = $adr . "_FN";
+	$nkey  = $adr . "_NAME";
+	$rwkey = $adr . "_RWTYPE";
+	$shkey = $adr . "_SHORTNAME";
+	$vnkey = $adr . "_VNAME";
+	$bkey  = $adr . "_BIT";
+	$dfkey = $adr . "_DEFAULT";
+	$nvkey = $adr . "_NOVERILOG";
+	$vvkey = $adr . "_VERILOG";
+	$nrkey = $adr . "_NOREG";
+	$rkey  = $adr . "_RESET";
+	$nrdkey= $adr . "_NO_RES_DEF";
+
+	if ((!(defined($data{$rkey}))) && 
+	    (!(defined($data{$bkey}))) && 
+	    (!(defined($data{$dfkey})))) {
+	    $data{$nrdkey}=1;
+	} else {
+	    $data{$nrdkey}=0;
+	}
+
+	if (!(defined($data{$rkey}))) {
+	    $data{$rkey} = 0;
+	}
+
+	if (!(defined($data{$dfkey}))) {
+	    $data{$dfkey} = 0;
+	}
+
+	if (!(defined($data{$nvkey}))) {
+	    $data{$nvkey} = 0;
+	}
+
+	if (!(defined($data{$vvkey}))) {
+	    $data{$vvkey} = 0;
+	}
+
+	if (!(defined($data{$nrkey}))) {
+	    $data{$nrkey} = 0;
+	}
+
+	if (!(defined($data{$nkey}))) {
+	    print "Error: No Register Name for address $adr\n";
+	    exit;
+	}
+
+	push @namelist,$data{$nkey};
+
+	# if no FN - use Name
+	if ( (!(defined($data{$fkey}))) && (defined($data{$nkey}))) {
+	    $data{$fkey} = $data{$nkey}
+	}
+
+	# if no RWTYPE, use RW
+	if (!(defined($data{$rwkey}))) {
+	    $data{$rwkey} = "RW";
+	}
+
+	# check for consistent RW TYPES
+	foreach $sb (@{$data{$bkey}}) {
+	    $rwbkey = $bkey . "_" . $sb . "_RW";
+	    if (!(exists($data{$rwbkey}))) {
+		$data{$rwbkey} = "NA";
+	    }
+	    if (($data{$rwbkey} ne $data{$rwkey}) && ($data{$rwbkey} ne "NA")) {
+		if ($data{$rwkey} eq "RW") {
+		    print "WARNING: Inconsistent RWTYPE $data{$rwbkey} (vs. $data{$rwkey}) for bits $sb of $adr (register RWTYPE may be RW by default)\n";
+		} else {
+		    print "WARNING: Inconsistent RWTYPE $data{$rwbkey} (vs. $data{$rwkey}) for bits $sb of $adr\n";
+		}
+	    }
+	}
+
+	# sort bits
+	@{$data{$bkey}} = numsort(@{$data{$bkey}});
+
+	# If no SHORTNAME, use first 6 tokens of name.  If no name, use address
+	if (!(defined($data{$shkey}))) {
+	    if (!(defined($data{$nkey}))) {
+		$data{$shkey} = "SHORTNAME_$adr";
+	    } else {
+		@words = split " ",$data{$nkey};
+		$lim = 5;
+		if ($#words < $lim) {
+		    $lim = $#words;
+		}
+		$data{$shkey}  =$words[0];
+		for ($x=1; $x <= $lim; $x++) {
+		    $data{$shkey} = $data{$shkey} . "_" . $words[$x];
+		}
+	    }
+	    # clean up non-alphanumeric characters from SHORTNAME
+	    $data{$shkey} =~ tr/\+\-\.\)\(//d;
+	    $data{$shkey} =~ tr/\,/\_/d;
+	    if (substr($data{$shkey},length($data{$shkey})-1,1) eq "_") {
+		$data{$shkey} = substr($data{$shkey},0,length($data{$shkey})-1);
+	    }
+	    # uppercase the shortname
+	    $data{$shkey} = uc($data{$shkey});
+#	    print "Creating SHORTNAME $data{$shkey}\n";
+	} else {
+	    # uppercase the shortname
+	    $data{$shkey} = uc($data{$shkey});
+	
+	    # for good shortnames, still remove spaces
+	    $data{$shkey} =~ tr/\ /\_/d;
+	}
+	
+	# if no VNAME - use lower-case short Name
+	if ( (!(defined($data{$vnkey}))) && (defined($data{$shkey}))) {
+	    $data{$vnkey} = lc($data{$shkey});
+	} else {
+	    $data{$vnkey} = lc($data{$vnkey});
+	}
+
+	# generate the rd and wr masks
+	gen_reg_masks($adr,0);
+    }
+
+    # check for duplicate register names
+    if ($#namelist >= 0) {
+	@nl_sorted = sort { $a cmp $b } @namelist;
+	$old="foo";
+	foreach $name (@nl_sorted) {
+	    if ($name eq $old) {
+		print "Warning: More than one register named $name\n";
+	    }
+	    $old = $name;
+	}
+    }
+}
+
+sub gen_reg_masks {
+    $adr = shift @_;
+    $op = shift @_;
+
+    # init string masks
+    $actmask="";
+    for ($k=0;$k<$maxwid;$k++) {
+	$actmask = $actmask . "0";
+    }
+
+    # generate keys
+    $bkey  = $adr . "_BIT";
+    $bfkey = $adr . "_BITFIELDS";
+
+    # go through bitfields
+    foreach $sb (@{$data{$bkey}}) {
+	
+	# generate keys, get RW type
+	$bitkey = $bkey . "_" . $sb;
+	$rwkey = $bitkey . "_" . "RW";
+	$rwtype = $data{$rwkey};
+	
+	# parse bit subscript
+	@subs = split ":",$sb;
+	$subh = shift @subs;
+	$subl = $subh;
+	if ($#subs >= 0) {
+	    $subl = shift @subs;
+	}
+
+	# flag bad subscripts
+	if (($subh < 0) || ($subl < 0)  || ($subh < $subl) || ($#subs > -1)) {
+	    print "Error: Bad subscript $sb for address $adr  ($subl $subh $#subs)\n";
+	} else {
+	
+	    # mod masks based on bit subscript
+	    for ($x=$subl; $x <= $subh; $x++) {
+		if ($op == 0) {
+		    if (($rwtype eq "RW") || ($rwtype eq "RO") || ($rwtype eq "WO") || ($rwtype eq "W1C")) {
+			substr($actmask,($maxwid-1)-$x,1) = "1";
+		    }
+		} elsif ($op == 1) {
+		    if ($rwtype eq "RW") {
+			substr($actmask,($maxwid-1)-$x,1) = "1";
+		    }
+		}
+	    }
+	}
+    }
+
+    if ($op == 1) {
+	$tmpmask = conv_to_hex(substr($actmask,-($addr_incr*8)));
+	return($tmpmask);
+    }
+
+    # generate list of active bitfields by parsing active mask
+    # on means we're in a field of 1s
+    $on=0;
+    for ($x = 0; $x <$maxwid; $x++) {
+	
+	# mark msb at first 1
+	if (($on==0) && (substr($actmask,$x,1) eq "1")) {
+	    $msb = ($maxwid-1) -$x;
+	    $on=1;
+	}
+	# at first 0, or top of register, mark lsb & store bit field
+	if (($on==1) && (($x==($maxwid-1)) || (substr($actmask,$x,1) eq "0"))) {
+	    # mark lsb
+	    if (($x==($maxwid-1)) && (substr($actmask,$x,1) eq "1")) {
+		$lsb = 0;
+	    } else {
+		$lsb = $maxwid - $x;
+	    }
+
+	    # store bit field
+	    if ($lsb == $msb) {
+		push @{$data{$bfkey}}, $lsb;
+	    } else {
+		push @{$data{$bfkey}}, "$msb" . "_" . "$lsb";
+	    }
+	    $on=0;
+	}
+    }
+}
+
+
+# check for proper address format
+sub check_addr {
+    $ad = shift @_;
+    while ((length($ad) > 1) && (substr($ad,0,1) eq "0")) {
+	$ad = substr($ad,1);
+    }
+
+
+    if ((length($ad) <= (2*$addr_incr)) && (uc($ad) =~ /^[0-9A-F]+$/)) {
+	return;
+    } else {
+	print "Error: Bad Address in source file: $ad. ($line) Exiting...\n\n";
+	exit;
+    }
+}
+
+# determine reset value for a given bitfield
+sub gen_reset {
+
+    # get adr, msb, lsb
+    $adr = shift @_;
+    $msb = shift @_;
+    if ($#_ > -1) {
+	$lsb = shift @_;
+    } else {
+	$lsb = $msb;
+    }
+
+
+    # get reset value
+    $rkey = $adr . "_RESET";
+    $reset = $data{$rkey};
+
+    # skip undefined values
+    if (lc($data{$rkey}) eq "undefined") {
+	return (lc($data{$rkey}));
+    }
+
+    # remove 0x prefix
+    if (substr($reset,0,2) eq "0x") {
+	$reset = substr($reset,2);
+    }
+
+    # convert decimal to hex
+    if (substr($reset,0,2) eq "\'d") {
+	$reset = sprintf("%X",substr($reset,2));
+    }
+
+
+    # check reset value for proper format
+    if (
+	((uc($reset) !~ /^[0-9A-F]+$/) && (lc($reset) !~ /^\'d[0-9]+$/))) {
+	print "Error: Bad Reset value for $adr:  $reset.  Exiting...\n\n";
+	exit;
+    }
+
+    # convert to a bit string
+    $reset_str = conv_hex_to_str($reset);
+
+    # field length
+    $field_len = $msb - $lsb + 1;
+
+    # extract sub-field matching msb:lsb from reset value
+    $bin_reset_str = substr($reset_str,($maxwid-1)-$msb,$field_len);
+
+    # convert it to hex
+    $hex_reset_val0 = conv_to_hex($bin_reset_str);
+
+    #prefix it
+    $hex_reset_val = $field_len . "'h" . $hex_reset_val0;
+
+    # return it
+    return($hex_reset_val);
+}
+
+sub conv_hex_to_str {
+# convert a hex string to a binary string
+
+    $hval = shift @_;
+    $bval = "";
+
+    $hl = length($hval);
+    # do it 1 chars at a time
+    for ($x=0; $x < $hl; $x=$x+1) {
+	
+	# get the digits
+	$hdig = substr($hval,$x,min(1,$hl-$x));
+
+	# convert to decimal, then hex
+	$ddig = hex($hdig);
+	$bdig = sprintf("%04b",$ddig);
+
+	# accumulate
+	$bval = $bval . $bdig;
+    }
+
+    # pad out to maxwid bits with 0s
+    while (length($bval) < $maxwid) {
+	$bval = "0" . $bval;
+    }
+
+    return ($bval);
+}
+
+
+sub conv_to_hex {
+# convert a binary string to hex
+
+    $bval = shift @_;
+    $hval = "";
+
+
+    # left-pad with 0s to a length divisible by 4 (so we have full hex digits)
+    while (length($bval)/4 != int(length($bval)/4)) {
+	$bval = "0" . $bval;
+    }
+
+
+    $bl = length($bval);
+    # do it 4 digits (1 hex digit) at a time
+    for ($x=0; $x < $bl; $x=$x+4) {
+	
+	# get the digit
+	$bdig = substr($bval,$x,min(4,$bl-$x));
+
+	# convert to decimal, then hex
+	$bdig = "0b" . $bdig;
+	$ddig = oct($bdig);
+	$hdig = sprintf("%01x",$ddig);
+
+	# accumulate
+	$hval = $hval . $hdig;
+    }
+    return ($hval);
+}
+
+
+
+# simple max and min functions
+sub max {
+    $aa = shift @_;
+    $ab = shift @_;
+    if ($aa > $ab) {
+	return($aa);
+    } else {
+	return($ab);
+    }
+}
+
+sub min {
+    $aa = shift @_;
+    $ab = shift @_;
+    if ($aa > $ab) {
+	return($ab);
+    } else {
+	return($aa);
+    }
+}
+
+
+
+# lsearch checks whether the first argument is found in the remaining
+# list of arguments
+sub lsearch {
+    $target = shift @_;
+    $found=0;
+    foreach $element (@_) {
+	if ($element eq $target) {
+	    $found=1;
+	    last;
+	}
+    }
+    return($found);
+}
+
+
+# do_check categorizes the line based on which keyword (if any) it has
+# -2 = skip
+# -1 = no keyword
+#  0 = keyword, no tokens
+#  1 = keyword, 1 token
+#  2 = keyword + string
+
+sub do_check {
+
+    $tmp = shift @_;
+
+    @tokens = split " ",$tmp;
+    # comment or blank/garbage
+    if (($#tokens < 0) || (substr($tmp,0,1) eq "\#")) {
+	return(-2);
+    }
+
+    if ($tokens[0] eq "DUPCNT") {
+	$dupcnt = $tokens[1];
+	return(-2);
+    }
+
+    if ($tokens[0] eq "GLOBAL") {
+	if ($#tokens != 2) {
+	    print "Error: Incorrect number of tokens on line: $tmp.  Exiting...\n";
+	    exit;
+	}
+	$global{lc($tokens[1])} = $tokens[2];
+	if ($tokens[1] eq "NOPIPE") {
+	    if ($tokens[2] !~ m/[0-1]/) {
+		print "Error: Bad value for NOPIPE\n";
+		exit;
+	    }
+	    $no_reg_pipe=$tokens[2];
+	} elsif ($tokens[1] eq "NORDPIPE") {
+	    if ($tokens[2] !~ m/[0-1]/) {
+		print "Error: Bad value for NORDPIPE\n";
+		exit;
+	    }
+	    $no_read_pipe=$tokens[2];
+	} elsif ($tokens[1] eq "BIGE") {
+	    if ($tokens[2] !~ m/[0-1]/) {
+		print "Error: Bad value for BIGE\n";
+		exit;
+	    }
+	    $bige=$tokens[2];
+	} elsif ($tokens[1] eq "DISPLAY_FACTOR") {
+	    $display_factor=$tokens[2];
+	} elsif ($tokens[1] eq "DEADSTR") {
+	    $deadstr=$tokens[2];
+	} elsif ($tokens[1] eq "DOCSNAME") {
+	    if (lsearch($tokens[2],@keywords)==0) {
+		print "Error: Unknown keyword as argument to DOCSNAME. Use DEFFLD to define keyword.\n";
+		exit;
+	    }
+	} elsif ($tokens[1] eq "AMAP_FIELD") {
+	    if (lsearch($tokens[2],@keywords)==0) {
+		print "Error: Unknown keyword as argument to AMAP_FIELD. \n";
+		exit;
+	    }
+	} elsif ($tokens[1] eq "SFR") {
+	} elsif ($tokens[1] eq "WRITEOUT") {
+	} else {
+	    print "Error: Unknown GLOBAL $tokens[1]\n";
+	    exit;
+	}
+	return(-2);
+    }
+
+    # look for keyword
+    $fnd = lsearch($tokens[0],@keywords);
+    if ($fnd == 0) {
+	return(-1);
+    } else {
+
+	# if we found one, check for correct number of tokens
+	$l = $keyw_len{$tokens[0]};
+	if (!((($tokens[0] eq "BIT") && ($#tokens < 3))) &&
+	    (!((lsearch($tokens[0],@simple_list)==1) && ($#tokens > 0))) &&
+	    (($l > -1) && ($l < 2) && ($#tokens != $l))) {
+	    $ttmp=$#tokens+1;
+	    $ltmp = $l+1;
+	    print "Error: Incorrect number of tokens on line. Found $ttmp, expected $ltmp: $tmp.  Exiting...\n";
+	    exit;
+	}
+	return($l);
+    }
+}
+
+# gen the address in proper hexadecimal for a case statement
+sub gen_case {
+    $valx = shift @_;
+    $gmsb = shift @_;
+    $format = shift @_;  # 2 formats
+    $ba = shift @_;
+
+
+    # remove base address
+    $val = rel_adr($valx,$ba);
+
+    $numbits = $gmsb + 1;
+    $numdigits = int($numbits/4);
+
+    if (($numbits/4 - $numdigits) > 0) {
+	$numdigits++;
+    }
+    $tmpstr = sprintf("%x",$val);
+    $len = length($tmpstr);
+    while ($len < $numdigits) {
+	$tmpstr = "0" . $tmpstr;
+	$len = length($tmpstr);
+    }
+    if ($format == 0) {
+	$tmpstr = $numbits . "'h" . $tmpstr . ":";
+    }
+    return($tmpstr);
+}
+
+# remove base addr
+sub rel_adr {
+    $adr1 = shift @_;
+    $hadr2 = shift @_;
+
+    $adr2 = hex($hadr2);
+
+    $netadr = $adr1 - $adr2;
+    return($netadr);
+}
+
+# sort the bit fields numerically,
+sub numsort {
+    @tmpa = ();
+    %tmpb = ();
+    foreach $entry (@_) {
+	@num = split(":",$entry);
+	push @tmpa, $num[0];
+	$tmpb{$num[0]} = $entry;
+    }
+    @srtd = sort { $b <=> $a } @tmpa;
+
+    @tmpc=();
+    foreach $entry (@srtd) {
+	push @tmpc, $tmpb{$entry};
+    }
+    return (@tmpc);
+}
+
+
+
+# fill in unused fields
+sub fillin {
+
+    $first=0;
+
+    @tmpd=();
+    foreach $entry (@_) {
+	@num = split(":",$entry);
+	if ($first == 0) {
+	    $first = 1;
+	    push @tmpd, $entry;
+	    $lowbit = $num[$#num];
+	} else {
+	    if ($num[0] != $lowbit - 1) {
+		$high = $lowbit - 1;
+		$low = $num[0] + 1;
+		if ($high == $low) {
+		    push @tmpd, $high;
+		} else {
+		    push @tmpd, $high . ":" . $low;
+		}
+	    }
+	    push @tmpd, $entry;
+	    $lowbit = $num[$#num];
+	}
+    }
+    return (@tmpd);
+}
+
+
+# expand addresses
+sub adr_expand {
+    my $adr = shift @_;
+    my $mode = shift @_;  # mode = 1 for header
+    my $nakey = $adr . "_NEXTADDR";
+    my $stkey = $adr . "_STARTADDR";
+    my $eakey = $adr . "_ENDADDR";
+    my $vnkey = $adr . "_VNAME";
+    my $nkey  = $adr . "_NAME";
+    my $adrcnt = 1;
+    my @alist = ();
+
+
+    # start with main address
+    push @alist, hex($adr);
+    $gname{hex($adr)} = $data{$vnkey};
+    $nname{hex($adr)} = $data{$nkey};
+
+
+    # if there are end addresses...
+    if (defined($data{$eakey})) {
+
+#	print "$adr: ST $#{$data{$stkey}} EE $#{$data{$eakey}}\n";
+	# check that we have proper arrays
+	if ($#{$data{$eakey}}  != $#{$data{$stkey}} + 1 ) {
+	    print "Error - Mismatch in Start/end addresses0\n";
+	    foreach $a (@{$data{$stkey}}) {
+		print "STARTADR: $a\n";
+	    }
+
+	    foreach $a (@{$data{$eakey}}) {
+		print "ENDADR: $a\n";
+	    }
+	    exit;
+	}
+
+	# generate an array of all the start addresses, start with current address + 1
+	my @stadr = ();
+	push @stadr, hex($adr)+$addr_incr;
+
+	
+	if (defined($data{$stkey})) {
+	    foreach $starta (@{$data{$stkey}}) {
+		push @stadr, hex($starta);
+	    }
+	}
+
+	# use the endaddr to drive the array, start with first start address
+	$sta = shift @stadr;
+	
+	# for each end address, start with the start address
+	# and add all addresses up to the end
+	foreach $eaddr (@{$data{$eakey}}) {
+	    $enum = hex($eaddr);
+	    while ($sta <= $enum) {
+		push @alist, $sta;
+		if ($mode == 1) {
+		    $gname{$sta} = $data{$vnkey} . "_" . $adrcnt;
+		    $nname{$sta} = $data{$nkey}  . "_" . $adrcnt;
+
+		    $gname{hex($adr)} = $data{$vnkey} . "_0";
+		    $nname{hex($adr)} = $data{$nkey}  . "_0";
+		} else {
+		    $gname{$sta} = $data{$vnkey} . "_i" . $adrcnt;
+		    $nname{$sta} = $data{$nkey} . "_i" . $adrcnt;
+		}
+		$sta = $sta + $addr_incr;
+		$adrcnt++;
+	    }
+	    # advance to next start address
+	    if ($#stadr > -1) {
+		$sta = shift @stadr;
+	    } 
+	}
+    }
+
+    # add all nextaddr
+    if (defined($data{$nakey})) {
+	foreach $sta (@{$data{$nakey}}) {
+	    $nnum = hex($sta);
+	    push @alist, $nnum;
+	    if ($mode == 1) {
+		$gname{hex($adr)} = $data{$vnkey} . "_0";
+		$nname{hex($adr)} = $data{$nkey}  . "_0";
+
+		$gname{$nnum} = $data{$vnkey} . "_" . $adrcnt;
+		$nname{$nnum} = $data{$nkey}  . "_" . $adrcnt;
+	    } else {
+		$gname{$nnum} = $data{$vnkey} . "_i" . $adrcnt;
+		$nname{$nnum} = $data{$nkey}  . "_i" . $adrcnt;
+	    }
+	    $adrcnt++;
+	}
+    }
+
+    #sort
+    @blist = sort { $a <=> $b } @alist;
+
+    return @blist; # return the list
+}
+
+sub init_proc {
+    my $fn = shift @_;
+    my @lns = ();
+    local *INFIL;
+    open(INFIL, "< $fn") or die "Could not open $fn";
+    if ($verbose) {print "Info: Opening $fn\n";}
+    $oldfile = $cur_file;
+    $cur_file = $fn;
+
+    while(defined($line = <INFIL>)) {
+	chomp $line;
+	@words = split " ",$line;
+
+	# if a VARIABLE line, do error checking and then add to database
+	if (($#words > -1) && ($words[0] eq "VARIABLE")) {
+	    if ($#words == 0) {
+		print "Error: No args on VARIABLE line, exiting\n";
+		exit;
+	    } elsif ($#words > 2) {
+		print "Error: Extra args on VARIABLE line, exiting\n";
+		exit;
+	    } elsif ($#words == 2) {
+		if (defined($vars{$words[1]})) {
+		    if ($verbose) {print "Info: Replacing Variable $words[1] with $words[2]\n";}
+		} else {
+		    if ($verbose) {print "Info: Defining  Variable $words[1] with $words[2]\n";}
+		}
+		$vars{$words[1]} = $words[2];
+	    } else {
+		delete($vars{$words[1]});
+	    }
+	}
+
+	# if an INCLUDE line, do error checking and then process the file (recursion) 
+	elsif (($#words > -1) && ($words[0] eq "INCLUDE")) {
+	    if ($#words == 0) {
+		print "Error: ($cur_file) No args on INCLUDE line, exiting\n";
+		exit;
+	    } elsif ($#words != 1) {
+		print "Error: ($cur_file) Extra args on INCLUDE line, exiting\n";
+		exit;
+	    } elsif (!(-e $words[1])) {
+		print "Error: ($cur_file) Unknown file $words[1] on INCLUDE line, exiting\n";
+		exit;
+	    } else {
+		@l2 = init_proc($words[1]);
+		push @lns, @l2;
+	    }
+	}
+
+	# otherwise, do variable substitution and collect the line
+	else {
+	    if (length($line)>0) {
+		while (($key, $value)= each (%vars)) {
+		    if ($line =~ "$key") {
+			$line =~ s/$key/$value/g;
+		    }
+		}
+	    }
+	    push @lns,$line;
+	}
+    }
+    close (INFIL);
+    $cur_file = $oldfile;
+    return(@lns);
+}
+
+# extend addresses to 8 characters for proper sort, then reduce
+sub special_sort {
+    my $zeros = "00000000";
+    foreach $ele (@_) {
+	$orig_len = length($ele);
+	$ele = substr($zeros,0,8-$orig_len) . $ele;
+	push @e2, $ele;
+	$len{$ele} = $orig_len;
+    }
+    @e3 = sort { $a cmp $b } @e2;
+    foreach $ele (@e3) {
+	$ele = substr($ele,8-$len{$ele});
+	push @e4, $ele;
+    }
+    return (@e4);
+}
+
+sub dec2bin {
+    my $str = unpack("B32", pack("N", shift));
+#   $str =~ s/^0+(?=\d)//; # otherwise you'll get leading zeros
+    return $str;
+}
+sub bin2dec {
+    return unpack("N", pack("B32", substr("0" x 32 . shift, -32)));
+}
+
+sub dfactor {
+    my $str = shift @_;
+    return(sprintf("%04x",$display_factor*hex("0x".$str)));
+}
+
+sub print_help {
+    $flag = shift @_;
+
+    if ($flag == 0) {
+	initial_help();
+	print "Type    regmaker.pl -l | more    for detailed help\n\n";
+	exit;
+    }
+
+    print "\nRegmaker.pl  Rev.".$rev." By Jeff Winston  http://www.kwcpa.com/tools  Email: tools\@kwcpa.com\n\n";
+
+    print "  Regmaker.pl generates register descriptions in different formats from a common\n";
+    print "  textual input.  Outputs include HTML, Verilog, C headers, and Matlab headers.\n";
+    print "  Registers can be de-populated, and logical register size does not have to match\n";
+    print "  Physical register size.  For example, you can select 8-bit physical registers, \n";
+    print "  and specify 9-bit logical registers, and Regmaker.pl will take care of the mapping.\n";
+    print "  Physical register sizes of 32, 16, or 8 bits are supported.  The C and Matlab code is\n";
+    print "  customizable.\n\n";
+
+    print "  IMPORTANT: there are a few project-specific variables at the top of the script that you need\n";
+    print "  to set properly.\n\n";
+
+    initial_help();
+
+    print "    -w is used to generate html output\n";
+    print "    -c is used to generate multiple output files in different C header formats.\n";
+    print "    -m generates matlab headers and tasks\n";
+    print "    -p overrides the internal definition of a project name at the top of the HTML output.\n";
+    print "    -s is used to generate output in the same format as the input source.\n";
+    print "    -v is used to generate verilog source\n";
+    print "    -vh is used to generate verilog headers (including mask values indicating RW bits (for test)\n";
+    print "    -vhm adds RWMASK parameters to the verilog header file.\n";
+    print "    -vhaln overrides the internal default length of address parameters in the verilog header file.\n";
+    print "    -var is used to define variables.  See VARIABLE below\n";
+    print "    -nopipe removes the pipeline delays in the verilog output\n";
+    print "    -nordpipe removes the post-read pipeline delays in the verilog output\n";
+    print "    -spec generates html of only the register descriptions without any embedded links\n";
+    print "    -secnum <value> indicates the number of the first section in the HTML\n";
+    print "    -noverilog causes only registers with VERILOG keyword to have verilog generated for them\n";
+    print "    -bige gives big endian ordering\n";
+    print "    -vb displays informational (verbose) messages\n\n";
+
+    print "  The pre-defined keywords for the textual input file description are described below:\n";
+    print "  You can also define your own (see DEFFLD below):\n\n";
+
+    print "    ADDR <addr> This is a special keyword.  It marks the start of a new register\n";
+    print "               description.  All information following the ADDR keyword, until\n";
+    print "               the next one, applies to the register at <addr>.  <addr> is\n";
+    print "               no more than a $addr_incr" . "-character hexadecimal number.\n\n";
+
+    print "    ENDADDR <addr> When an address range is specified, this is the ending\n";
+    print "               address of the range.  So, for example, to express range <A> thru\n";
+    print "               <B>, you would use:\n\n";
+
+    print "                 ADDR <A>\n";
+    print "                 ENDADDR <B>\n\n";
+
+    print "    STARTADDR <addr> When you want to associated multiple address ranges with a \n";
+    print "               single register, you use STARTADDR for the starting address of\n";
+    print "               the second and subsequent ranges.\n\n";
+
+    print "    NEXTADDR <addr> [<addr>...] Another way of associating multiple addresses with\n";
+    print "               a single register description is to list the addresses.  NEXTADDR\n";
+    print "               is used for the second and subsequent addresses in the list.\n\n";
+
+    print "    BASEADDR <addr> This value is added to all subsequent addresses, except for\n";
+    print "                    verilog output.\n\n";
+
+    print "    BASEOFF <addr> This value is added to all subsequent addresses, except for\n";
+    print "                    verilog output. It can be used to locally modify BASEADDR\n\n";
+
+    print "    BASEFACTOR <addr> This value scales all subsequent addresses, except for\n";
+    print "                    verilog output.\n\n";
+
+    print "    DEFAULT <value> This is the value to be initialized by the software.  It is\n";
+    print "               listed in the html doc, and is output in the SW header file.\n\n";
+
+    print "    SECTION <string> The section name associated with the register. If none is\n";
+    print "               given, defaults to the value given the last time this keyword was\n";
+    print "               used in the input file.\n\n";
+
+    print "    NAME <string> The long name of the register at the top of its description in\n";
+    print "               the HTML description.  \n\n";
+
+    print "    SHORTNAME | SNAME <string>  The shortname should be a single text token (i.e.,\n";
+    print "               no spaces). It is used in the Address Map in the HTML, as the verilog\n";
+    print "               basename, and as the software header base name. If no shortname is\n";
+    print "               given, NAME is used. \n\n";
+
+    print "    VNAME <string>.  This is used as the base of the register name in verilog\n";
+    print"               output.  It defaults to the SHORTNAME, converted to lower-case.\n\n";
+
+#    print "    FN <string> The Function is text used in the Address Map in the HTML.\n\n"; obsolete
+
+    print "    RESET <value>  The reset value for the register.  If none is given, 0 is \n";
+    print "              assumed.  \n\n";
+
+    print "    RWTYPE <string> The RW type for the register.  Valid options are RW, RO, WO, and W1C.\n";
+    print "              If none is given, RW is assumed.  For W1C, the verilog is the same as RO.\n";
+    print "              You should use a DECODE statement and generate your W1C logic externally.\n\n";              
+
+    print "    REGDES  REGDES is used on a line by itself.  All subsequent lines, until a\n";
+    print "              line containing another keyword, or END, are a free-form register\n";
+    print "              description displayed in the HTML output.  (Avoid < and > in your text.)\n\n";
+
+    print "    BIT marks the start of a bit description.  A bit description is constructed\n";
+    print "              as follows:\n\n";
+
+    print "              BIT  <msb:lsb> | <bit> [<rwtype>]\n";
+    print "              <description>\n";
+    print "                 ...\n";
+    print "              <description>\n";
+    print "              <keyword>\n\n";
+
+    print "              So, following the BIT keyword, you put the range, or, if a single\n";
+    print "              bit is described, the bit number.  You optionally follow this with\n";
+    print "              a RWTYPE. If no RWTYPE is given, the RWTYPE specified for the\n";
+    print "              register is assumed. You follow this with 1-n lines of free-form\n";
+    print "              text which is used in the HTML.  You close the text with another\n";
+    print "              keyword, or the END terminator.   (Avoid < and > in your description.)\n\n";
+
+    print "              NOTE:  The RWtype must match the RWtype of the register, or be \"NA\".\n\n";
+
+    print "    DECODE R|W|RW  Used for Verilog generation. This adds an address decode on read \n";
+    print "                   (and/or write) at the least-significant byte of the register address.\n\n";
+
+    print "    DECOFF <val>   Used for Verilog generation.  This shifts the address decode <val> bytes \n";
+    print "                   above the least-significant byte of the register address.\n\n";
+
+    print "    DECEARLY       Used for Verilog generation.  This uses the unregistered read or write\n";
+    print "                   signals for the DECODE.\n\n";
+
+    print "    END Used by itself on a line to terminate a register or bit description.\n\n";
+
+    print "    TITLE <text> Uses <text> as the title of the file.\n\n";
+
+    print "    MATLAB_NAME <text> Assigns the name of the register for MATLAB purposes.\n\n";
+
+    print "    HTML_TITLE <text> Uses <text> as the title of the html window.  Keep this string short.\n\n";
+
+    print "    NOVERILOG  Indicates that no verilog should be written for this register\n";
+    print "    VERILOG    Indicates that verilog should be written for this register (used with \n";
+    print "                   -noverilog global option).\n\n";
+
+    print "    NOREG is like NOVERILOG but generates decode RTL if specified.\n\n";
+
+    print "    MEMORY marks an entry as a memory (excluded from register test).\n";
+    print "    NOREGTEST marks an entry as  excluded from register test.\n\n";
+
+    print "    GLOBAL <name> <value> Assigns a variable for use by the script\n";
+    print "              - SFR denotes SFR registers (specific to 8051 architecture).\n";
+    print "              - WRITEOUT generates an output for write data latched in the verilog module.\n";
+    print "              - NOPIPE, NORDPIPE and BIGE do the same things as their command-line parameters.\n\n";
+    print "              - DOCSNAME replaces the SHORT NAME field in the HTML documentation with\n";
+    print "                a user-named field defined using DEFFLD.\n"; 
+    print "              - DEADSTR replaces dead on reads with another string\n";
+    print "              - DISPLAY_FACTOR specifies a multiplicative factor applied to all addresses\n";
+    print "                   only in the HTML file.  \n";
+    print "              - AMAP_FIELD adds a 2nd field to the Address Map. Select by keyword\n\n";
+
+    print "    INCLUDE <filename>    Allows the inclusion of files within files\n\n";
+
+    print "    VARIABLE <name> [<value>] Allow the definition of textual substitution values.  Regmaker.pl\n";
+    print "              will apply these substitutions to every subsequent line before any processing.\n";
+    print "              Using the INCLUDE and VARIABLE commands adroitly allows the reuse of a sub-file\n";
+    print "              with selected names modified for each inclusion.  <name> should be something not\n";
+    print "              usually found in text (example: ZZ in first 2 characters).  Omitting the <value>\n";
+    print "              removes the substitution from the database.  Note: Do not use characters that\n";
+    print "              have meanings in regex expressions.  It's safest to stick with alphanumerics.\n\n";
+
+    print "    DEFFLD <keyword> <args> <descr> provides a mechanism to add keywords.  This allows the user\n";
+    print "              to have Regmaker collect project-specific data which can be used by user-written\n";
+    print "              routines, or output at the end of the HTML DESCRIPTION field.  <args> = {0, 1, 2}\n";
+    print "              where 2 indicates a multi-token field with spaces.  <descr>=1 adds the data to the\n";
+    print "              end of the HTML description field.   Otherwise, set <descr> to 0\n\n";
+
+    print "    PROJECT <name> overrides project name\n\n";
+
+    print "  Lines in the source file can also be blank, or start with a \# which indicates a comment.\n\n";
+    exit;
+}
+
+
+
+sub initial_help {
+    print "  Usage: regmaker.pl [-w <html_output_filename>]               \\\n";
+    print "                     [-c <header_output_filename>]             \\\n";
+    print "                     [-m <matlab_output_filename>]             \\\n";
+    print "                     [-p <project name>]                       \\\n";
+    print "                     [-s <source_output_filename>]             \\\n";
+    print "                     [-th <tcl_output_filename>]               \\\n";
+    print "                     [-v <verilog_output_filename>]            \\\n";
+    print "                     [-vt <register test_filename>]            \\\n";
+    print "                     [-vh[m] <verilog_header_output_filename>] \\\n";
+    print "                     [-vhaln <verilog_header_address_length>]  \\\n";
+    print "                     [-var <name> <value>]                     \\\n";
+    print "                     [-nopipe] [-spec] [-secnum <value>]       \\\n";
+    print "                     [-noverilog] [-bige] [-vb]                \\\n";
+    print "                     <input_filename> [input_filename2> ... <inputfilenameN>]\n\n";
+    
+}
+

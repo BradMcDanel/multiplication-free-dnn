@@ -1,0 +1,17 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  \
+j_mac.v \
+fullAdder.v \
+j_MX_cell.v \
+j_systolic_array.v \
+j_max_power_wrapper.v \
+
+sv xil_defaultlib \
+"tb_max_power.sv" \
+
+# compile glbl module
+verilog xil_defaultlib \
+"glbl.v"
+
+# Do not sort compile order
+nosort

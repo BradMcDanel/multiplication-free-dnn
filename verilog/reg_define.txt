@@ -1,0 +1,187 @@
+# to use this example type
+# regmaker.pl -p projectname -v example.v -vh example.vh -m example.m -w example.html -c example.h example.txt
+
+GLOBAL NOPIPE 1
+BASEADDR 000000
+
+SECTION SYSTOLIC_CTRL
+
+##################################################
+# start
+##################################################
+ADDR 000
+NAME start_sytolic_array
+RWTYPE WO
+REGDES
+start_sytolic_array
+bit 0: start weight update
+bit 1: start systolic array
+BIT 1:0
+
+##################################################
+# status
+##################################################
+ADDR 004
+NAME sytolic_array_idle
+RWTYPE RO
+REGDES
+sytolic_array_idle
+bit 0: update weigth idle
+bit 1: systolic array idle
+RESET 0x3
+BIT 1:0 RO
+
+##################################################
+# status
+##################################################
+ADDR 008
+NAME systolic_width_size
+RWTYPE RW
+REGDES
+input_width_size
+BIT 31:0 RW
+
+##################################################
+# status
+##################################################
+ADDR 00C
+NAME systolic_height_size
+RWTYPE RW
+REGDES
+input_height_size
+BIT 31:0 RW
+
+##################################################
+# status
+##################################################
+ADDR 010
+NAME input_xin_width_size
+RWTYPE RW
+REGDES
+input_xin_size
+BIT 31:0 RW
+
+##################################################
+# status
+##################################################
+ADDR 014
+NAME input_xin_height_size
+RWTYPE RW
+REGDES
+input_xin_height_size
+BIT 31:0 RW
+
+##################################################
+# status
+##################################################
+ADDR 018
+NAME input_acc_size
+RWTYPE RW
+REGDES
+input_acc_size
+BIT 31:0 RW
+
+##################################################
+# input channel start address
+# 64x8 channel, every channel 16 bit address
+##################################################
+ADDR 100
+NAME input_channel_start_addr
+REGDES
+input_channel_start_addr
+BIT 8191:0 RW
+
+##################################################
+# input channel shift directory
+# 64x8 channel, every channel 4 bit shifte direct
+##################################################
+ADDR 500
+NAME input_channel_shift_ctrl
+REGDES
+input_channel_shift_ctrl
+SHT_KEEP       = 0
+SHT_UP         = 1
+SHT_DOWN       = 2
+SHT_LEFT       = 3
+SHT_RIGHT      = 4
+SHT_RIGHT_UP   = 5
+SHT_RIGHT_DOWN = 6
+SHT_LEFT_DOWN  = 7
+SHT_LEFT_UP    = 8
+BIT 2047:0 RW
+
+
+##################################################
+# input acc channel start address
+# 32x4 channel, every channel 16 bit address
+##################################################
+ADDR 600
+NAME input_acc_channel_start_addr
+REGDES
+input_acc_channel_start_addr
+BIT 2047:0 RW
+
+##################################################
+# input acc channel shift control
+# 32x4 channel, every channel 1 bit shifte control
+##################################################
+ADDR 700
+NAME input_acc_channel_shift_ctrl
+REGDES
+input_acc_channel_shift_ctrl
+SHT_KEEP       = 1
+SHT_ZERO       = 0
+BIT 127:0 RW
+
+
+##################################################
+# output acc channel start address
+# 32x4 channel, every channel 16 bit address
+##################################################
+ADDR 800
+NAME output_acc_channel_start_addr
+REGDES
+output_channel_start_addr
+BIT 2047:0 RW
+
+##################################################
+# output acc channel shift control
+# 32x4 channel, every channel 1 bit shifte control
+##################################################
+ADDR 900
+NAME output_channel_shift_ctrl
+REGDES
+output_channel_shift_ctrl
+0: to ReQReLu6
+1: tor acc
+BIT 0 RW
+
+##################################################
+# column combine channel select
+# 64x32 channel, every channel 4 bit mux control
+##################################################
+ADDR A00
+NAME column_combine_ctrl
+REGDES
+column_combine_ctrl
+BIT 8191:0 RW
+
+##################################################
+# weight sign/plus one control
+# 64x32 channel, every channel 1 bit sign/plus one control
+##################################################
+ADDR E00
+NAME w_control1_ctrl
+REGDES
+w_control1_ctrl
+BIT 2047:0 RW
+
+##################################################
+# weight end base address
+# 64x32 channel, every channel 16 bit end base address
+##################################################
+ADDR F00
+NAME input_weight_channel_end_addr
+REGDES
+input_weight_channel_end_addr
+BIT 1023:0 RW

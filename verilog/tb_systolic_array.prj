@@ -1,0 +1,16 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  \
+j_mac.v \
+fullAdder.v \
+j_MX_cell.v \
+j_systolic_array.v \
+
+sv xil_defaultlib \
+"tb_systolic_array.sv" \
+
+# compile glbl module
+verilog xil_defaultlib \
+"glbl.v"
+
+# Do not sort compile order
+nosort

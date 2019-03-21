@@ -1,0 +1,15 @@
+# compile verilog/system verilog design source files
+verilog xil_defaultlib  \
+j_acc_shifter.v \
+sram.v \
+\
+
+sv xil_defaultlib \
+"tb_acc_shifter.sv" \
+
+# compile glbl module
+verilog xil_defaultlib \
+"glbl.v"
+
+# Do not sort compile order
+nosort

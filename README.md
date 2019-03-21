@@ -15,4 +15,4 @@ python fpga_compiler.py --dataset-root /hdd1/datasets --dataset cifar10 --load-p
 ```
 
 ## FPGA Verilog code
-See the [verilog/](https://github.com/BradMcDanel/multiplication-free-dnn/verilog) for details on the verilog implementation of the multiplication-free systolic array.
+See the [verilog/](https://github.com/BradMcDanel/multiplication-free-dnn/tree/master/verilog) for details on the verilog implementation of the multiplication-free systolic array.

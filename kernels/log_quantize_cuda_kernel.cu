@@ -48,7 +48,7 @@ at::Tensor log_quantize_cuda_forward(
   const auto size = input.numel();
   auto output = at::zeros_like(input);
 
-  const int32_t threads = 1024;
+  const int32_t threads = 128;
   const int32_t blocks = (size + threads - 1) / threads;
 
   AT_DISPATCH_FLOATING_TYPES(input.type(), "log_quantize_forward_cuda", ([&] {
@@ -71,7 +71,7 @@ at::Tensor log_quantize_cuda_backward(
     const float max_exp) {
 
   const auto size = input.numel();
-  const int threads = 1024;
+  const int threads = 128;
   const int blocks = (size + threads - 1) / threads;
 
   AT_DISPATCH_FLOATING_TYPES(input.type(), "log_quantize_backward_cuda", ([&] {

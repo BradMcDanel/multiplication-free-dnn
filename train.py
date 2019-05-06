@@ -121,7 +121,8 @@ if __name__ == '__main__':
     parser.add_argument('--n-class', type=int, help='number of classes')
     parser.add_argument('--layer-type', default='float', choices=['float', 'quant'],
                         help='type of layer')
-    parser.add_argument('--bn-type', default='float-bn', choices=['float-bn', 'mean-bn', 'quant-bn', 'none'],
+    parser.add_argument('--bn-type', default='float-bn',
+                        choices=['float-bn', 'quant-bn', 'quant-old-bn', 'quant-cuda-bn'],
                         help='type of layer')
     parser.add_argument('--save-path', required=True, help='path to save model')
     args = parser.parse_args()

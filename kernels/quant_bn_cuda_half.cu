@@ -6,7 +6,7 @@
 
 #include "utils/checks.h"
 #include "utils/cuda.cuh"
-#include "inplace_abn.h"
+#include "quant_bn.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
@@ -249,27 +249,4 @@ at::Tensor backward_cuda_h(at::Tensor z, at::Tensor dz, at::Tensor var, at::Tens
   return dx;
 }
 
-__global__ void leaky_relu_backward_impl_h(half *z, half *dz, float slope, int64_t count) {
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count;  i += blockDim.x * gridDim.x){
-    float _z = __half2float(z[i]);
-    if (_z < 0) {
-      dz[i] = __float2half(__half2float(dz[i]) * slope);
-      z[i] = __float2half(_z / slope);
-    }
-  }
-}
-
-void leaky_relu_backward_cuda_h(at::Tensor z, at::Tensor dz, float slope) {
-  CHECK_CUDA_INPUT(z);
-  CHECK_CUDA_INPUT(dz);
-
-  int64_t count = z.numel();
-  dim3 threads(getNumThreads(count));
-  dim3 blocks = (count + threads.x - 1) / threads.x;
-  auto stream = at::cuda::getCurrentCUDAStream();
-  leaky_relu_backward_impl_h<<<blocks, threads, 0, stream>>>(
-      reinterpret_cast<half*>(z.data<at::Half>()),
-      reinterpret_cast<half*>(dz.data<at::Half>()),
-      slope, count);
-}
 

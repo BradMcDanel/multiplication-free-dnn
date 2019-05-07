@@ -122,7 +122,7 @@ if __name__ == '__main__':
     parser.add_argument('--layer-type', default='float', choices=['float', 'quant'],
                         help='type of layer')
     parser.add_argument('--bn-type', default='float-bn',
-                        choices=['float-bn', 'quant-bn', 'quant-old-bn', 'quant-cuda-bn'],
+                        choices=['float-bn', 'quant-bn'],
                         help='type of layer')
     parser.add_argument('--save-path', required=True, help='path to save model')
     args = parser.parse_args()

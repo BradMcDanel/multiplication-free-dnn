@@ -45,8 +45,8 @@ def build_model(args):
         layer = net.make_quant_layer(args.data_exp, args.data_bins, args.weight_levels,
                                      args.max_weight_exp, bn=args.bn_type,
                                      reshape_stride=args.reshape_stride)
-    model = net.ShiftMobile(settings, layer=layer, in_channels=3*(args.reshape_stride**2),
-                            n_class=args.n_class, dropout=False)
+    model = net.ShiftNet(settings, layer=layer, in_channels=3*(args.reshape_stride**2),
+                         n_class=args.n_class, dropout=False)
     
     if args.input_size != 224 and args.dataset == 'imagenet':
         model = nn.Sequential([net.Interpolate(args.input_size), model])

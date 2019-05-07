@@ -10,7 +10,7 @@ from torch.distributions import categorical
 
 from itertools import product
 import util
-from bn import ABN, InPlaceABN
+from bn import QuantBN
 
 quantize_cuda = load(
     'quantize_cuda', ['kernels/quantize_cuda.cpp', 'kernels/quantize_cuda_kernel.cu'], extra_cflags=['-O3'])
@@ -25,27 +25,6 @@ def _make_pair(x):
         return x
     else:
         return (x, x)
-
-
-
-def convert_bn(bn_layer, delta, maxv, sf_const=0.75):
-    data_exp = delta / sf_const
-    scale_bins = int(maxv / delta)
-    shift_bins = 2**12
-
-    mu = bn_layer.running_mean
-    sigma = torch.sqrt(bn_layer.running_var + bn_layer.eps)
-    beta = bn_layer.bias
-    gamma = bn_layer.weight
-
-    scale = gamma / sigma
-    shift = beta - (gamma * mu) / sigma
-
-    scale = util.find_quantize(scale, scale_bins, 1)
-    shift = util.find_quantize(shift, shift_bins, sf_const)
-
-    return FoldedBN(scale, shift)
-
 
 class log_quantize(torch.autograd.Function):
     @staticmethod
@@ -284,254 +263,6 @@ class LogConv2d(nn.Module):
         return s.format(**self.__dict__)
 
 
-class MeanBatchNorm2d(torch.nn.Module):
-    def __init__(self, num_features, delta, maxv, eps=1e-3, momentum=0.9,
-                 affine=False, track_running_stats=True):
-        super(MeanBatchNorm2d, self).__init__()
-        self.num_features = num_features
-        self.delta = delta
-        self.maxv = maxv
-        self.eps = eps
-        self.momentum = momentum
-        self.track_running_stats = track_running_stats
-        self._shift = nn.Parameter(torch.zeros(num_features), requires_grad=affine)
-        self.register_buffer('running_mean', torch.zeros(num_features))
-
-    def forward(self, x):
-        if not self.training:
-            return (x + self.shift.view(1, -1, 1, 1))
-
-        mu = x.mean(0).mean(1).mean(1)
-        if self.track_running_stats is True:
-            self.running_mean.detach().mul_(self.momentum).add_(mu*(1 - self.momentum))
-        _shift = self.fold_shift(mu)
-        return (x + _shift.view(1, -1, 1, 1))
-    
-    def fold_shift(self, mu):
-        _shift = self._shift - mu
-        _shift = quantize.apply(_shift, self.delta, -self.maxv, self.maxv, -self.maxv)
-        return _shift
-    
-    @property
-    def shift(self):
-        return self.fold_shift(self.running_mean)
-
-    def extra_repr(self):
-        return '{num_features}, eps={eps}, momentum={momentum}, ' \
-               'track_running_stats={track_running_stats}'.format(**self.__dict__)
-
-class BatchNorm2d(torch.nn.Module):
-    def __init__(self, num_features, delta, maxv, max_exp, num_levels,
-                 base=2, eps=1e-3, momentum=0.9, track_running_stats=True):
-        super(BatchNorm2d, self).__init__()
-        self.num_features = num_features
-        self.delta = delta
-        self.maxv = maxv
-        self.max_exp = max_exp
-        self.min_exp = max_exp - num_levels + 1
-        self.base = base
-        self.eps = eps
-        self.momentum = momentum
-        self.track_running_stats = track_running_stats
-        self._shift = nn.Parameter(torch.zeros(num_features))
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_std', torch.ones(num_features))
-
-    def forward(self, x):
-        self.running_std[self.running_std==0] = self.eps
-        if not self.training:
-            return (self.scale.view(1, -1, 1, 1) * x) + self.shift.view(1, -1, 1, 1)
-
-        y = x.transpose(0, 1).contiguous().view(x.size(1), -1)
-        mu = y.mean(dim=1)
-        sigma = y.std(dim=1)
-        sigma.data[sigma==0] = self.eps
-        if self.track_running_stats is True:
-            self.running_mean.detach().mul_(1-self.momentum).add_(self.momentum*mu)
-            self.running_std.detach().mul_(1-self.momentum).add_(self.momentum*sigma)
-
-        _shift = self.fold_shift(mu, sigma)
-        _scale = self.fold_scale(sigma)
-
-        return (_scale.view(1, -1, 1, 1) * x) + _shift.view(1, -1, 1, 1)
-    
-    def fold_scale(self, sigma):
-        _scale = log_quantize.apply(1 / sigma, self.base, self.min_exp, self.max_exp)
-        return _scale
-    
-    def fold_shift(self, mu, sigma):
-        _shift = self._shift + (-mu / sigma)
-        _shift = quantize.apply(_shift, self.delta, -self.maxv, self.maxv, -self.maxv)
-        return _shift
-    
-    @property
-    def scale(self):
-        return self.fold_scale(self.running_std)
-
-    @property
-    def shift(self):
-        return self.fold_shift(self.running_mean, self.running_std)
-
-
-class BatchNorm2dV2(torch.nn.Module):
-    def __init__(self, num_features, delta, maxv, max_exp, num_levels,
-                 base=2, eps=1e-5, momentum=0.9, track_running_stats=True):
-        super(BatchNorm2dV2, self).__init__()
-        self.num_features = num_features
-        self.delta = delta
-        self.maxv = maxv
-        self.max_exp = max_exp
-        self.min_exp = max_exp - num_levels + 1
-        self.base = base
-        self.eps = eps
-        self.momentum = momentum
-        self.track_running_stats = track_running_stats
-        self.register_buffer('running_mean', torch.zeros(num_features))
-        self.register_buffer('running_std', torch.ones(num_features))
-
-    def forward(self, x):
-        self.running_std[self.running_std==0] = self.eps
-        if not self.training:
-            return (x - self.shift.view(1, -1, 1, 1)) / self.scale.view(1, -1, 1, 1)
-
-        y = x.transpose(0, 1).contiguous().view(x.size(1), -1)
-        mu = y.mean(dim=1)
-        sigma = y.std(dim=1) + self.eps
-        if self.track_running_stats is True:
-            self.running_mean.detach().mul_(1-self.momentum).add_(self.momentum*mu)
-            self.running_std.detach().mul_(1-self.momentum).add_(self.momentum*sigma)
-
-        _shift = self.fold_shift(mu, sigma)
-        _scale = self.fold_scale(sigma)
-
-        return (x - _shift.view(1, -1, 1, 1)) / _scale.view(1, -1, 1, 1)
-    
-    def fold_scale(self, sigma):
-        # _scale = log_quantize.apply(1 / sigma, self.base, self.min_exp, self.max_exp)
-        _scale = 1 / sigma
-        return _scale
-    
-    def fold_shift(self, mu, sigma):
-        # _shift = quantize.apply(mu, self.delta, -self.maxv, self.maxv, -self.maxv)
-        _shift = mu
-        return _shift
-    
-    @property
-    def scale(self):
-        return self.fold_scale(self.running_std)
-
-    @property
-    def shift(self):
-        return self.fold_shift(self.running_mean, self.running_std)
-
-
-class MyBatchNorm2d(nn.BatchNorm2d):
-    def __init__(self, num_features, delta, maxv, max_exp, num_levels,
-                 eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
-        super(MyBatchNorm2d, self).__init__(
-            num_features, eps, momentum, affine, track_running_stats)
-        self.delta = delta
-        self.maxv = maxv
-        self.max_exp = max_exp
-        self.min_exp = max_exp - num_levels + 1
-
-    def forward(self, input):
-        self._check_input_dim(input)
-        eaf = 0.0
-        if self.training and self.track_running_stats:
-            if self.num_batches_tracked is not None:
-                self.num_batches_tracked += 1
-                if self.momentum is None:  # use cumulative moving average
-                    eaf = 1.0 / float(self.num_batches_tracked)
-                else:  # use exponential moving average
-                    eaf = self.momentum
-
-        # calculate running estimates
-        if self.training:
-            mean = input.mean([0, 2, 3])
-            var = input.var([0, 2, 3], unbiased=False)
-            n = input.numel() / input.size(1)
-            self.running_mean.detach().mul_(1-eaf).add_(eaf * mean)
-            self.running_var.detach().mul_(1-eaf).add_(eaf * var * n / (n-1))
-        else:
-            mean = self.running_mean
-            var = self.running_var
-
-        sigma = torch.sqrt(var + self.eps)
-
-
-        # quantizate bn params
-        sigma = log_quantize.apply(sigma, 2, -8, 6)
-        mean = quantize.apply(mean, self.delta, -self.maxv, self.maxv, -self.maxv)
-        weight = log_quantize.apply(self.weight, 2, -8, 6)
-        bias = quantize.apply(self.bias, self.delta, -self.maxv, self.maxv, -self.maxv)
-
-        # apply bn
-        # input = (input - mean[None, :, None, None]) / sigma[None, :, None, None]
-        input = (input - mean.view(1, -1, 1, 1)).div_(sigma.view(1, -1, 1, 1))
-        if self.affine:
-            input.mul_(weight.view(1, -1, 1, 1)).add_(bias.view(1, -1, 1, 1))
-
-        return input
-
-    
-    def fold_scale(self, sigma):
-        # _scale = log_quantize.apply(1 / sigma, 2, -8, 8)
-        _scale = 1 / sigma
-        return _scale
-    
-    def fold_shift(self, mu, sigma):
-        _shift = self.bias - (mu / sigma)
-        # _shift = quantize.apply(_shift, self.delta, -self.maxv, self.maxv, -self.maxv)
-        return _shift
-    
-    @property
-    def scale(self):
-        return self.fold_scale(self.running_std)
-
-    @property
-    def shift(self):
-        return self.fold_shift(self.running_mean, self.running_std)
-
-class FoldedBN(nn.Module):
-    def __init__(self, scale, shift):
-        super(FoldedBN, self).__init__()
-        self.shift = nn.Parameter(shift)
-        self.scale = nn.Parameter(scale)
-    
-    def forward(self, x):
-        return self.scale.view(1, -1, 1, 1) * x + self.shift.view(1, -1, 1, 1)
-
-class Bias(nn.Module):
-    def __init__(self, num_features, delta, maxv):
-        super(Bias, self).__init__()
-        self._shift = nn.Parameter(torch.zeros(num_features))
-        self.delta = delta
-        self.maxv = maxv
-    
-    def forward(self, x):
-        return x + self.shift.view(1, -1, 1, 1)
-    
-    @property
-    def shift(self):
-        return quantize.apply(self._shift, self.delta, -self.maxv, self.maxv, -self.maxv)
-
-class View(nn.Module):
-    def __init__(self, shape):
-        super(View, self).__init__()
-        self.shape = shape
-
-    def forward(self, x):
-        return x.view(self.shape)
-
-class Interpolate(nn.Module):
-    def __init__(self, size):
-        super(Interpolate, self).__init__()
-        self.size = size
-
-    def forward(self, x):
-        return F.interpolate(x, self.size)
-
 class CheckerboardReshape(nn.Module):
     def __init__(self, s):
         super(CheckerboardReshape, self).__init__()
@@ -548,8 +279,12 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
     # quantization values
     delta = 2**data_exp
     maxv = data_bins * delta
-    bn_min = 2**(data_exp - 8)
-    bn_max = 2**16 * bn_min
+    max_exp = int(max_exp)
+    min_exp = int(max_exp - weight_levels + 1)
+    bn_min_exp = -8
+    bn_max_exp = 8
+    bn_delta = 2**(data_exp - 8)
+    bn_maxv = 2**16 * bn_delta
 
     def quant_layer(in_channels, out_channels, stride, groups, layer_idx, num_layers):
         layer = []
@@ -571,14 +306,9 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
         if not last:
             if bn == 'float-bn':
                 layer.append(nn.BatchNorm2d(out_channels))
-            elif bn == 'quant-cuda-bn':
-                layer.append(InPlaceABN(out_channels, activation='none'))
-            elif bn == 'quant-old-bn':
-                layer.append(BatchNorm2d(out_channels, bn_min, bn_max, max_exp, weight_levels))
             elif bn == 'quant-bn':
-                layer.append(MyBatchNorm2d(out_channels, bn_min, bn_max, max_exp, weight_levels))
-            elif bn == 'none':
-                layer.append(Bias(out_channels, bn_min, bn_max))
+                layer.append(QuantBN(out_channels, log_min_exp=bn_min_exp, log_max_exp=bn_max_exp,
+                                     delta=bn_delta, maxv=bn_maxv))
             layer.append(Quantize(delta, 0, maxv))
 
         layer = nn.Sequential(*layer)
@@ -616,9 +346,9 @@ def make_float_layer(reshape_stride=1):
     return float_layer
 
 
-class ShiftMobile(nn.Module):
+class ShiftNet(nn.Module):
     def __init__(self, settings, layer, in_channels=3, n_class=1000, dropout=False):
-        super(ShiftMobile, self).__init__()
+        super(ShiftNet, self).__init__()
         input_channel = settings[0][0]
         layer_idx = 0
         num_layers = sum([n for c, n, s, g in settings]) + 2

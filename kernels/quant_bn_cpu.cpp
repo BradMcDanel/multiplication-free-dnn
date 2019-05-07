@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "utils/checks.h"
-#include "inplace_abn.h"
+#include "quant_bn.h"
 
 at::Tensor reduce_sum(at::Tensor x) {
   if (x.ndimension() == 2) {

@@ -7,7 +7,7 @@
 
 #include "utils/checks.h"
 #include "utils/cuda.cuh"
-#include "inplace_abn.h"
+#include "quant_bn.h"
 
 #include <ATen/cuda/CUDAContext.h>
 
@@ -106,45 +106,40 @@ std::vector<at::Tensor> mean_var_cuda(at::Tensor x) {
 
 template<typename T>
 __global__ void forward_kernel(T *x, const T *mean, const T *var, const T *weight, const T *bias,
-                               bool affine, float eps, int num, int chn, int sp) {
+                               bool affine, float eps, int num, int chn, int sp, 
+                               int log_min_exp, int log_max_exp, float delta, float maxv) {
   int plane = blockIdx.x;
 
+  float minv = -maxv;
+  float clampv = minv;
   T _mean = mean[plane];
   T _var = var[plane];
   T _weight = affine ? abs(weight[plane]) + eps : T(1);
   T _bias = affine ? bias[plane] : T(0);
-
   T mul = rsqrt(_var + eps) * _weight;
 
   //log quantize mul
   T mul_exp = roundf(__log2f(abs(mul)));
-  T mul_round = mul_exp < -8 ? 0 :  __powf(2, fminf(mul_exp, 8));
+  T mul_round = mul_exp < log_min_exp ? 0 :  __powf(2, fminf(mul_exp, log_max_exp));
   mul = (signbit(mul) ? -1 : 1) * mul_round;
 
-  //linear quant _mean, _bias
-  T minv = -7.9375;
-  T clampv = minv;
-  T maxv = 7.9375;
-  T delta = 0.0625;
-  _mean = (_mean < minv) ?
+  //linear quant _shift
+  T _shift = -_mean*mul + _bias;
+  _shift = (_shift < minv) ?
           clampv :
-          fminf(fmaxf(delta*floor((_mean / delta) + 0.5), minv), maxv);
-
-  _bias = (_bias < minv) ?
-          clampv :
-          fminf(fmaxf(delta*floor((_bias / delta) + 0.5), minv), maxv);
+          fminf(fmaxf(delta*floor((_shift / delta) + 0.5), minv), maxv);
 
   for (int batch = 0; batch < num; ++batch) {
     for (int n = threadIdx.x; n < sp; n += blockDim.x) {
       T _x = x[(batch * chn + plane) * sp + n];
-      T _y = (_x - _mean) * mul + _bias;
+      T _y = _x * mul + _shift;
       x[(batch * chn + plane) * sp + n] = _y;
     }
   }
 }
 
 at::Tensor forward_cuda(at::Tensor x, at::Tensor mean, at::Tensor var, at::Tensor weight, at::Tensor bias,
-                        bool affine, float eps) {
+                        bool affine, float eps, int log_min_exp, int log_max_exp, float delta, float maxv) {
   CHECK_CUDA_INPUT(x);
   CHECK_CUDA_INPUT(mean);
   CHECK_CUDA_INPUT(var);
@@ -166,7 +161,8 @@ at::Tensor forward_cuda(at::Tensor x, at::Tensor mean, at::Tensor var, at::Tenso
         var.data<scalar_t>(),
         weight.data<scalar_t>(),
         bias.data<scalar_t>(),
-        affine, eps, num, chn, sp);
+        affine, eps, num, chn, sp,
+        log_min_exp, log_max_exp, delta, maxv);
   }));
 
   return x;
@@ -287,64 +283,4 @@ at::Tensor backward_cuda(at::Tensor z, at::Tensor dz, at::Tensor var, at::Tensor
   }));
 
   return dx;
-}
-
-/**************
- * activations
- **************/
-
-template<typename T>
-inline void leaky_relu_backward_impl(T *z, T *dz, float slope, int64_t count) {
-  // Create thrust pointers
-  thrust::device_ptr<T> th_z = thrust::device_pointer_cast(z);
-  thrust::device_ptr<T> th_dz = thrust::device_pointer_cast(dz);
-
-  auto stream = at::cuda::getCurrentCUDAStream();
-  thrust::transform_if(thrust::cuda::par.on(stream),
-                       th_dz, th_dz + count, th_z, th_dz,
-                       [slope] __device__ (const T& dz) { return dz * slope; },
-                       [] __device__ (const T& z) { return z < 0; });
-  thrust::transform_if(thrust::cuda::par.on(stream),
-                       th_z, th_z + count, th_z,
-                       [slope] __device__ (const T& z) { return z / slope; },
-                       [] __device__ (const T& z) { return z < 0; });
-}
-
-void leaky_relu_backward_cuda(at::Tensor z, at::Tensor dz, float slope) {
-  CHECK_CUDA_INPUT(z);
-  CHECK_CUDA_INPUT(dz);
-
-  int64_t count = z.numel();
-
-  AT_DISPATCH_FLOATING_TYPES(z.type(), "leaky_relu_backward_cuda", ([&] {
-    leaky_relu_backward_impl<scalar_t>(z.data<scalar_t>(), dz.data<scalar_t>(), slope, count);
-  }));
-}
-
-template<typename T>
-inline void elu_backward_impl(T *z, T *dz, int64_t count) {
-  // Create thrust pointers
-  thrust::device_ptr<T> th_z = thrust::device_pointer_cast(z);
-  thrust::device_ptr<T> th_dz = thrust::device_pointer_cast(dz);
-
-  auto stream = at::cuda::getCurrentCUDAStream();
-  thrust::transform_if(thrust::cuda::par.on(stream),
-                       th_dz, th_dz + count, th_z, th_z, th_dz,
-                       [] __device__ (const T& dz, const T& z) { return dz * (z + 1.); },
-                       [] __device__ (const T& z) { return z < 0; });
-  thrust::transform_if(thrust::cuda::par.on(stream),
-                       th_z, th_z + count, th_z,
-                       [] __device__ (const T& z) { return log1p(z); },
-                       [] __device__ (const T& z) { return z < 0; });
-}
-
-void elu_backward_cuda(at::Tensor z, at::Tensor dz) {
-  CHECK_CUDA_INPUT(z);
-  CHECK_CUDA_INPUT(dz);
-
-  int64_t count = z.numel();
-
-  AT_DISPATCH_FLOATING_TYPES(z.type(), "leaky_relu_backward_cuda", ([&] {
-    elu_backward_impl<scalar_t>(z.data<scalar_t>(), dz.data<scalar_t>(), count);
-  }));
 }

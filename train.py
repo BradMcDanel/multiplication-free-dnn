@@ -67,11 +67,6 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
             lr = g['lr']                    
             break        
 
-        if epoch in prune_epochs:
-            util.prune_group(model, prune_rates[prune_epoch])
-            curr_weights, _ = util.num_nonzeros(model)
-            prune_epoch += 1
-
         # if epoch in prune_epochs:
         #     util.prune(model, prune_rates[prune_epoch])
         #     packing.pack_model(model, args.gamma)
@@ -81,6 +76,11 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
 
         train_loss = util.train(train_loader, model, train_loss_f, optimizer, epoch, args)
         test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch, args)
+
+        if epoch in prune_epochs:
+            util.prune_group(model, prune_rates[prune_epoch])
+            curr_weights, _ = util.num_nonzeros(model)
+            prune_epoch += 1
 
         print('LR        :: {}'.format(lr))
         print('Train Loss:: {}'.format(train_loss))

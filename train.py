@@ -42,7 +42,7 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
 
     # compute pruning scheduele
     prune_epoch = 0
-    max_p = 0.8
+    max_p = 1.0
     prune_epochs = int(0.5*epochs)
     prune_rates = [max_p * (1 - (1 - (i / prune_epochs))**3) for i in range(prune_epochs)]
     prune_rates[-1] = max_p
@@ -63,22 +63,21 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
     # pruning stage
     for epoch in range(1, epochs + 1):
         print('[Epoch {}]'.format(epoch))
-        util.adjust_learning_rate(optimizer, epoch - 1, init_lr)
         for g in optimizer.param_groups:     
             lr = g['lr']                    
             break        
 
-        # if epoch in prune_epochs:
-        #     util.prune_group(model, prune_rates[prune_epoch])
-        #     curr_weights, _ = util.num_nonzeros(model)
-        #     prune_epoch += 1
-
         if epoch in prune_epochs:
-            util.prune(model, prune_rates[prune_epoch])
-            packing.pack_model(model, args.gamma)
-            macs = np.sum([x*y for x, y in model.packed_layer_size])
-            curr_weights, num_weights = util.num_nonzeros(model)
+            util.prune_group(model, prune_rates[prune_epoch])
+            curr_weights, _ = util.num_nonzeros(model)
             prune_epoch += 1
+
+        # if epoch in prune_epochs:
+        #     util.prune(model, prune_rates[prune_epoch])
+        #     packing.pack_model(model, args.gamma)
+        #     macs = np.sum([x*y for x, y in model.packed_layer_size])
+        #     curr_weights, num_weights = util.num_nonzeros(model)
+        #     prune_epoch += 1
 
         train_loss = util.train(train_loader, model, train_loss_f, optimizer, epoch, args)
         test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch, args)
@@ -116,6 +115,9 @@ if __name__ == '__main__':
                         help='number of epochs to train (default: 50)')
     parser.add_argument('--lr', type=float, default=0.1,
                         help='learning rate (default: 0.1)')
+    parser.add_argument('--lr-type', default='cosine', type=str, metavar='T',
+                        help='learning rate strategy (default: cosine)',
+                        choices=['cosine', 'multistep'])
     parser.add_argument('--dataset', default='mnist', help='dataset name')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
     parser.add_argument('--print-freq', default=100, type=int, help='printing frequency')

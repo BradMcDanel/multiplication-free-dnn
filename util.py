@@ -40,11 +40,26 @@ def group_weight(module):
     groups = [dict(params=group_decay), dict(params=group_no_decay, weight_decay=.0)]
     return groups
 
-def adjust_learning_rate(optimizer, epoch, init_lr):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    lr = init_lr * (0.1 ** (epoch // 30))
+def adjust_learning_rate(optimizer, epoch, args, batch=None,
+                         nBatch=None, method='cosine'):
+    if method == 'cosine':
+        T_total = args.epochs * nBatch
+        T_cur = (epoch % args.epochs) * nBatch + batch
+        lr = 0.5 * args.lr * (1 + math.cos(math.pi * T_cur / T_total))
+    elif method == 'multistep':
+        if args.dataset in ['cifar10', 'cifar100']:
+            lr, decay_rate = args.lr, 0.1
+            if epoch >= args.epochs * 0.75:
+                lr *= decay_rate**2
+            elif epoch >= args.epochs * 0.5:
+                lr *= decay_rate
+        else:
+            """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+            lr = args.lr * (0.1 ** (epoch // 30))
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+    return lr
+
 
 
 class AverageMeter(object):
@@ -134,6 +149,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     for i, (x, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
+
+        # adjust learning rate
+        adjust_learning_rate(optimizer, epoch, args, batch=i,
+                             nBatch=len(train_loader), method=args.lr_type)
 
         if args.cuda is not None:
             x = x.cuda()

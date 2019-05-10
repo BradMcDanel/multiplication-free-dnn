@@ -59,7 +59,7 @@ class QuantBN(autograd.Function):
     @staticmethod
     def forward(ctx, x, weight, bias, running_mean, running_var,
                 training=True, momentum=0.1, eps=1e-05, log_min_exp=-8,
-                log_max_exp=8, delta=2**-4, maxv = 127*2**-4):
+                log_max_exp=8, delta=2**-4, maxv = 127*2**-4, track_running_stats=True):
         # Save context
         ctx.training = training
         ctx.momentum = momentum
@@ -72,12 +72,13 @@ class QuantBN(autograd.Function):
         weight = weight.contiguous() if ctx.affine else x.new_empty(0, dtype=torch.float32)
         bias = bias.contiguous() if ctx.affine else x.new_empty(0, dtype=torch.float32)
 
-        if ctx.training:
+        if ctx.training and track_running_stats:
             mean, var = _backend.mean_var(x)
 
-            # Update running stats
-            running_mean.mul_((1 - ctx.momentum)).add_(ctx.momentum * mean)
-            running_var.mul_((1 - ctx.momentum)).add_(ctx.momentum * var * count / (count - 1))
+            if track_running_stats:
+                # Update running stats
+                running_mean.mul_((1 - ctx.momentum)).add_(ctx.momentum * mean)
+                running_var.mul_((1 - ctx.momentum)).add_(ctx.momentum * var * count / (count - 1))
 
             # Mark in-place modified tensors
             ctx.mark_dirty(x, running_mean, running_var)
@@ -113,7 +114,7 @@ class QuantBN(autograd.Function):
             dweight[weight < 0] *= -1
         dbias = edz if ctx.affine else None
 
-        return dx, dweight, dbias, None, None, None, None, None, None, None, None, None
+        return dx, dweight, dbias, None, None, None, None, None, None, None, None, None, None
 
 
 quant_bn = QuantBN.apply

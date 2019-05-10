@@ -19,6 +19,27 @@ log_quantize_cuda = load(
 shift_cuda = load(
     'shift_cuda', ['kernels/shift_cuda.cpp', 'kernels/shift_cuda_kernel.cu'], extra_cflags=['-O3'])
 
+class LabelSmoothing(nn.Module):
+    """
+    NLL loss with label smoothing.
+    """
+    def __init__(self, smoothing=0.0):
+        """
+        Constructor for the LabelSmoothing module.
+        :param smoothing: label smoothing factor
+        """
+        super(LabelSmoothing, self).__init__()
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+
+    def forward(self, x, target):
+        logprobs = torch.nn.functional.log_softmax(x, dim=-1)
+
+        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
+        nll_loss = nll_loss.squeeze(1)
+        smooth_loss = -logprobs.mean(dim=-1)
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+        return loss.mean()
 
 def _make_pair(x):
     if hasattr(x, '__len__'):
@@ -100,22 +121,10 @@ class Quantize(nn.Module):
         self.minv = minv
         self.maxv = maxv
         self.clampv = clampv
-        self._data = [None]*8
 
     def forward(self, x):
         h = quantize.apply(x, self.delta, self.minv, self.maxv, self.clampv)
-        self._data[h.device.index] = h
-
         return h
-    
-    @property
-    def data(self):
-        d = []
-        for _d in self._data:
-            if _d is not None:
-                d.append(_d)
-        
-        return d
 
     def extra_repr(self):
         return 'delta={delta}, minv={minv}, maxv={maxv}'.format(**self.__dict__)
@@ -184,9 +193,6 @@ class Conv2d(nn.Module):
         self._weight = nn.Parameter(torch.Tensor(N))
         self._weight.data.normal_(0, math.sqrt(2. / n))
 
-        # pytorch v0.4, seems to error if register_buffer is called on empty Tensor
-        self.register_buffer('_quant_idxs', torch.Tensor([0]).long())
-        self.register_buffer('_quant_values', torch.Tensor([0]))
         self.register_buffer('_mask', torch.ones(N))
 
     def forward(self, x):
@@ -194,8 +200,6 @@ class Conv2d(nn.Module):
                     
     @property
     def weight(self):
-        if self._quant_idxs.size()[0] > 1:
-            self._weight.data[self._quant_idxs] = self._quant_values
         w = self.mask*self._weight
         return w.view(self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
 
@@ -262,6 +266,20 @@ class LogConv2d(nn.Module):
         s += 'min_exp={min_exp}'
         return s.format(**self.__dict__)
 
+class Bias(nn.Module):
+    def __init__(self, num_features, delta, maxv):
+        super(Bias, self).__init__()
+        self._shift = nn.Parameter(torch.zeros(num_features))
+        self.delta = delta
+        self.maxv = maxv
+    
+    def forward(self, x):
+        return x + self.shift.view(1, -1, 1, 1)
+    
+    @property
+    def shift(self):
+        return quantize.apply(self._shift, self.delta, -self.maxv, self.maxv, -self.maxv)
+
 
 class CheckerboardReshape(nn.Module):
     def __init__(self, s):
@@ -310,6 +328,9 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
                 layer.append(QuantBN(out_channels, log_min_exp=bn_min_exp, log_max_exp=bn_max_exp,
                                      delta=bn_delta, maxv=bn_maxv))
             layer.append(Quantize(delta, 0, maxv))
+        else:
+            pass
+            layer.append(Bias(out_channels, bn_delta, bn_maxv))
 
         layer = nn.Sequential(*layer)
     
@@ -324,23 +345,22 @@ def make_float_layer(reshape_stride=1):
         first = layer_idx == 0
         last = layer_idx == num_layers - 1
 
-        if first and reshape_stride != 1:
-            layer.append(CheckerboardReshape(reshape_stride))
+        if first:
+            if reshape_stride != 1:
+                layer.append(CheckerboardReshape(reshape_stride))
         elif last:
-            pass
+            layer.append(nn.AdaptiveAvgPool2d(1))
         else:
             layer.append(Shift(in_channels, 3))
-        
+
         layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
 
         if not last:
             layer.append(nn.BatchNorm2d(out_channels))
-            layer.append(nn.ReLU(inplace=True))
-        else:
-            layer.append(nn.AdaptiveAvgPool2d(1))
+            layer.append(nn.ReLU6(inplace=True))
 
         layer = nn.Sequential(*layer)
-
+    
         return layer
     
     return float_layer

@@ -118,21 +118,32 @@ __global__ void forward_kernel(T *x, const T *mean, const T *var, const T *weigh
   T _bias = affine ? bias[plane] : T(0);
   T mul = rsqrt(_var + eps) * _weight;
 
+  T shift = -_mean*mul + _bias;
+
   //log quantize mul
   T mul_exp = roundf(__log2f(abs(mul)));
   T mul_round = mul_exp < log_min_exp ? 0 :  __powf(2, fminf(mul_exp, log_max_exp));
   mul = (signbit(mul) ? -1 : 1) * mul_round;
 
-  //linear quant _shift
-  T _shift = -_mean*mul + _bias;
-  _shift = (_shift < minv) ?
+  // //linear quant shift
+  shift = (shift < minv) ?
           clampv :
-          fminf(fmaxf(delta*floor((_shift / delta) + 0.5), minv), maxv);
+          fminf(fmaxf(delta*floor((shift / delta) + 0.5), minv), maxv);
+
+  _mean = (_mean < minv) ?
+          clampv :
+          fminf(fmaxf(delta*floor((_mean / delta) + 0.5), minv), maxv);
+
+  _bias = (_bias < minv) ?
+          clampv :
+          fminf(fmaxf(delta*floor((_bias / delta) + 0.5), minv), maxv);
+
 
   for (int batch = 0; batch < num; ++batch) {
     for (int n = threadIdx.x; n < sp; n += blockDim.x) {
       T _x = x[(batch * chn + plane) * sp + n];
-      T _y = _x * mul + _shift;
+      // T _y = _x * mul + shift;
+      T _y = (_x - _mean) * mul + _bias;
       x[(batch * chn + plane) * sp + n] = _y;
     }
   }

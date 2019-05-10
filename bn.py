@@ -46,6 +46,7 @@ class QuantBN(nn.Module):
         self.log_max_exp = log_max_exp
         self.delta = delta
         self.maxv = maxv
+        self.track_running_stats = True
         if self.affine:
             self.weight = nn.Parameter(torch.ones(num_features))
             self.bias = nn.Parameter(torch.zeros(num_features))
@@ -64,13 +65,9 @@ class QuantBN(nn.Module):
             nn.init.constant_(self.bias, 0)
 
     def forward(self, x):
-        x = functional.batch_norm(x, self.running_mean, self.running_var, self.weight, self.bias,
-                                  self.training, self.momentum, self.eps)
-
-    def forward(self, x):
         return quant_bn(x, self.weight, self.bias, self.running_mean, self.running_var,
                         self.training, self.momentum, self.eps, self.log_min_exp,
-                        self.log_max_exp, self.delta, self.maxv)
+                        self.log_max_exp, self.delta, self.maxv, self.track_running_stats)
 
     def __repr__(self):
         rep = '{name}({num_features}, eps={eps}, momentum={momentum}, affine={affine}, ' \

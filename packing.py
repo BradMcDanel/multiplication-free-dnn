@@ -190,6 +190,13 @@ def pack_model(model, overlap_pct, metric='min', verbose=False, section_size=256
     for i, layer in enumerate(util.get_quantconv_layers(model)):
         param = layer.weight.data
         B, C, W, H = param.shape
+
+        #do not over prune 
+        total = B*C*W*H
+        ones = layer.mask.view(-1).sum().long().item()
+        if 1.1 * (total / ones) > layer.groups:
+            continue
+
         overlap = int(overlap_pct*B)
         param = param.view(B, C*W*H).cpu().numpy()
         num_sections = math.ceil(param.shape[1] / section_size)

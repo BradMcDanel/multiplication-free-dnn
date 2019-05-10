@@ -15,16 +15,26 @@ import torch.nn as nn
 import datasets
 import util
 import packing
+import net
 
-loss = nn.CrossEntropyLoss()
 
-def train_model(model, model_path, train_loader, test_loader, init_lr, epochs):
+
+def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, args):
+    train_loss_f = net.LabelSmoothing(0.1)
+    # train_loss_f = nn.CrossEntropyLoss()
+    val_loss_f = nn.CrossEntropyLoss()
+    best_model_path = '.'.join(model_path.split('.')[:-1]) + '.best.pth'
+
+    for bn in util.get_batchnorm_layers(model):
+        bn.weight.requires_grad = False
+        bn.weight.data.zero_().add_(1)
+
     # tracking stats
     if not hasattr(model, 'stats'):
         model.stats = {'train_loss': [], 'test_acc': [], 'test_loss': [],
                        'weight': [], 'lr': [], 'macs': [], 'efficiency': []}
 
-    curr_weights, num_weights = util.num_nonzeros(model)
+    curr_weights, _ = util.num_nonzeros(model)
     if hasattr(model, 'packed_layer_size'):
         macs = np.sum([x*y for x, y in model.packed_layer_size])
     else:
@@ -32,22 +42,23 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs):
 
     # compute pruning scheduele
     prune_epoch = 0
-    max_prune_rate = 0.85
-    max_prune_rate = 0.8
-    final_prune_epoch = int(0.5*args.epochs)
-    num_prune_epochs = 10
-    prune_rates = [max_prune_rate*(1 - (1 - (i / num_prune_epochs))**3)
-                   for i in range(num_prune_epochs)]
-    prune_rates[-1] = max_prune_rate
-    prune_epochs = np.linspace(0, final_prune_epoch, num_prune_epochs).astype('i').tolist()
+    max_p = 0.8
+    prune_epochs = int(0.5*epochs)
+    prune_rates = [max_p * (1 - (1 - (i / prune_epochs))**3) for i in range(prune_epochs)]
+    prune_rates[-1] = max_p
+    prune_epochs = np.arange(1, prune_epochs + 1)
+
+
     print("Pruning Epochs: {}".format(prune_epochs))
     print("Pruning Rates: {}".format(prune_rates))
 
     # optimizer
-    ps = filter(lambda x: x.requires_grad, model.parameters())
-    optimizer = optim.SGD(ps, lr=init_lr, momentum=0.9, nesterov=True, weight_decay=1e-4)
+    optimizer = optim.SGD(util.group_weight(model), lr=init_lr, momentum=0.9,
+                          nesterov=True, weight_decay=1e-4)
     print("Optimizer:")
     print(optimizer)
+
+    best_acc = 0
 
     # pruning stage
     for epoch in range(1, epochs + 1):
@@ -57,33 +68,40 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs):
             lr = g['lr']                    
             break        
 
+        # if epoch in prune_epochs:
+        #     util.prune_group(model, prune_rates[prune_epoch])
+        #     curr_weights, _ = util.num_nonzeros(model)
+        #     prune_epoch += 1
+
         if epoch in prune_epochs:
             util.prune(model, prune_rates[prune_epoch])
-            curr_weights, num_weights = util.num_nonzeros(model)
             packing.pack_model(model, args.gamma)
             macs = np.sum([x*y for x, y in model.packed_layer_size])
             curr_weights, num_weights = util.num_nonzeros(model)
             prune_epoch += 1
 
-        train_loss = util.train(model, train_loader, optimizer, epoch, loss)
-        test_loss, test_acc = util.test(model, test_loader, epoch, loss)
+        train_loss = util.train(train_loader, model, train_loss_f, optimizer, epoch, args)
+        test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch, args)
 
         print('LR        :: {}'.format(lr))
         print('Train Loss:: {}'.format(train_loss))
         print('Test  Loss:: {}'.format(test_loss))
         print('Test  Acc.:: {}'.format(test_acc))
         print('Nonzeros  :: {}'.format(curr_weights))
-        model.stats['train_loss'].append(train_loss)
-        model.stats['test_loss'].append(test_loss)
-        model.stats['test_acc'].append(test_acc)
+        print('')
+        print('')
         model.stats['lr'].append(lr)
-        model.stats['efficiency'].append(100.0 * (curr_weights / macs))
         model.optimizer = optimizer.state_dict()
 
         model.cpu()
-        util.clear_quant_data(model)
         torch.save(model, model_path)
+        if test_acc > best_acc and epoch > prune_epochs[-1]:
+            print('New best model found')
+            torch.save(model, best_model_path)
+            best_acc = test_acc
+
         model.cuda()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Basic Training Script')
@@ -100,12 +118,11 @@ if __name__ == '__main__':
                         help='learning rate (default: 0.1)')
     parser.add_argument('--dataset', default='mnist', help='dataset name')
     parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
+    parser.add_argument('--print-freq', default=100, type=int, help='printing frequency')
     parser.add_argument('--aug', default='+', help='data augmentation level (`-`, `+`)')
     parser.add_argument('--data-exp', type=int, default=-4, help='fixed point exp')
     parser.add_argument('--gamma', type=float, default=1.75,
                         help='column combine gamma parameter (default: 1.75)')
-    parser.add_argument('--sparsity-lambda', type=float, default=0,
-                        help='data sparsity loss penalty')
     parser.add_argument('--data-bins', type=int, default=127,
                         help='max activation bin (default: 127)')
     parser.add_argument('--weight-levels', type=int, default=4,
@@ -146,7 +163,6 @@ if __name__ == '__main__':
         model = util.build_model(args)
     else:
         model = torch.load(args.load_path)
-    model.sparsity_lambda = args.sparsity_lambda
 
     if args.cuda:
         model = model.cuda()
@@ -155,4 +171,4 @@ if __name__ == '__main__':
     print(util.num_nonzeros(model))
     print('Target Nonzeros:', util.target_nonzeros(model))
 
-    train_model(model, args.save_path, train_loader, test_loader, args.lr, args.epochs)
+    train_model(model, args.save_path, train_loader, test_loader, args.lr, args.epochs, args)

@@ -154,7 +154,7 @@ def get_cifar10(dataset_root, batch_size, is_cuda=True, aug='+'):
     test_loader.num_samples = len(test)
     return train, train_loader, test, test_loader
 
-def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
+def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=20,
                  cache_mul=16, in_memory=False, val_only=False, input_size=224):
     train_path = os.path.join(dataset_root, 'imagenet-msgpack', 'ILSVRC-train.bin')
     val_path = os.path.join(dataset_root, 'imagenet-msgpack', 'ILSVRC-val.bin')
@@ -170,7 +170,7 @@ def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
                                     lambda x: cv2.imdecode(x, cv2.IMREAD_COLOR),
                                     lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2RGB),
                                     transforms.ToPILImage(),
-                                    transforms.RandomResizedCrop(input_size, scale=(0.2, 1.0)),
+                                    transforms.RandomResizedCrop(input_size, scale=(0.08, 1.0)),
                                     transforms.RandomHorizontalFlip(),
                                     transforms.ToTensor(),
                                     normalize,

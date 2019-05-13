@@ -17,11 +17,15 @@ import util
 import packing
 import net
 
+from resnet50 import ResNet50
+from model_refinery_wrapper import ModelRefineryWrapper
+import refinery_loss
 
 
-def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, args):
-    train_loss_f = net.LabelSmoothing(0.1)
+def train_model(wrapped_model, model, model_path, train_loader, test_loader, init_lr, epochs, args):
+    # train_loss_f = net.LabelSmoothing(0.1)
     # train_loss_f = nn.CrossEntropyLoss()
+    train_loss_f = refinery_loss.RefineryLoss()
     val_loss_f = nn.CrossEntropyLoss()
     best_model_path = '.'.join(model_path.split('.')[:-1]) + '.best.pth'
 
@@ -41,12 +45,23 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
         macs = curr_weights
 
     # compute pruning scheduele
+    '''
     prune_epoch = 0
     max_p = 1.0
     prune_epochs = int(0.5*epochs)
     prune_rates = [max_p * (1 - (1 - (i / prune_epochs))**3) for i in range(prune_epochs)]
     prune_rates[-1] = max_p
     prune_epochs = np.arange(1, prune_epochs + 1)
+    '''
+
+    prune_epoch = 0
+    max_prune_rate = 0.8
+    final_prune_epoch = int(0.5*args.epochs)
+    num_prune_epochs = 10
+    prune_rates = [max_prune_rate*(1 - (1 - (i / num_prune_epochs))**3)
+                   for i in range(num_prune_epochs)]
+    prune_rates[-1] = max_prune_rate
+    prune_epochs = np.linspace(0, final_prune_epoch, num_prune_epochs).astype('i').tolist()
 
 
     print("Pruning Epochs: {}".format(prune_epochs))
@@ -67,20 +82,22 @@ def train_model(model, model_path, train_loader, test_loader, init_lr, epochs, a
             lr = g['lr']                    
             break        
 
-        # if epoch in prune_epochs:
-        #     util.prune(model, prune_rates[prune_epoch])
-        #     packing.pack_model(model, args.gamma)
-        #     macs = np.sum([x*y for x, y in model.packed_layer_size])
-        #     curr_weights, num_weights = util.num_nonzeros(model)
-        #     prune_epoch += 1
+        if epoch in prune_epochs:
+            util.prune(model, prune_rates[prune_epoch])
+            packing.pack_model(model, args.gamma)
+            macs = np.sum([x*y for x, y in model.packed_layer_size])
+            curr_weights, num_weights = util.num_nonzeros(model)
+            prune_epoch += 1
 
-        train_loss = util.train(train_loader, model, train_loss_f, optimizer, epoch, args)
-        test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch, args)
+        train_loss = util.train(train_loader, wrapped_model, train_loss_f, optimizer, epoch-1, args)
+        test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch-1, args)
 
+        '''
         if epoch in prune_epochs:
             util.prune_group(model, prune_rates[prune_epoch])
             curr_weights, _ = util.num_nonzeros(model)
             prune_epoch += 1
+        '''
 
         print('LR        :: {}'.format(lr))
         print('Train Loss:: {}'.format(train_loss))
@@ -133,6 +150,8 @@ if __name__ == '__main__':
                         help='maximum weight exponent')
     parser.add_argument('--load-path', default=None,
                         help='path to load model - trains new model if None')
+    parser.add_argument('--teacher-path', default=None,
+                        help='path to teacher model')
     parser.add_argument('--in-memory', action='store_true',
                         help='ImageNet Dataloader setting (store in memory)')
     parser.add_argument('--input-size', type=int, help='spatial width/height of input')
@@ -166,6 +185,12 @@ if __name__ == '__main__':
     else:
         model = torch.load(args.load_path)
 
+    # teacher model
+    teacher = ResNet50()
+    teacher.load_state_dict(torch.load(args.teacher_path))
+    teacher.cuda()
+    wrapped_model = ModelRefineryWrapper(model, teacher)
+
     if args.cuda:
         model = model.cuda()
 
@@ -173,4 +198,4 @@ if __name__ == '__main__':
     print(util.num_nonzeros(model))
     print('Target Nonzeros:', util.target_nonzeros(model))
 
-    train_model(model, args.save_path, train_loader, test_loader, args.lr, args.epochs, args)
+    train_model(wrapped_model, model, args.save_path, train_loader, test_loader, args.lr, args.epochs, args)

@@ -54,8 +54,16 @@ def adjust_learning_rate(optimizer, epoch, args, batch=None,
             elif epoch >= args.epochs * 0.5:
                 lr *= decay_rate
         else:
-            """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-            lr = args.lr * (0.1 ** (epoch // 30))
+            """Following Label Refinery paper"""
+            if epoch < 140:
+                lr = args.lr
+            elif epoch < 170:
+                lr = 0.1 * args.lr
+            else:
+                lr = 0.01 * args.lr
+            #lr = args.lr * (0.1 ** (epoch // 30))
+    else:
+        assert False
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     return lr
@@ -161,6 +169,13 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # compute output
         output = data_parallel(model, x)
         loss = criterion(output, target)
+
+        if isinstance(loss, tuple):
+            loss, _ = loss
+
+        if isinstance(output, tuple):
+            output, _ = output
+
         # if args.l1_penalty > 0:
         #     loss += args.l1_penalty*l1_weight_total(model)
 
@@ -180,7 +195,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         end = time.time()
 
         # record stats in model for visualization
-        model.stats['train_loss'].append(loss.item())
+        model.model.stats['train_loss'].append(loss.item())
 
         if i % args.print_freq == 0 or i == len(train_loader) - 1:
             print('Train:: [{0}][{1}/{2}]\t'

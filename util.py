@@ -196,6 +196,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
         # record stats in model for visualization
         model.model.stats['train_loss'].append(loss.item())
+        # model.stats['train_loss'].append(loss.item())
 
         if i % args.print_freq == 0 or i == len(train_loader) - 1:
             print('Train:: [{0}][{1}/{2}]\t'

@@ -19,6 +19,17 @@ log_quantize_cuda = load(
 shift_cuda = load(
     'shift_cuda', ['kernels/shift_cuda.cpp', 'kernels/shift_cuda_kernel.cu'], extra_cflags=['-O3'])
 
+class ShuffleBlock(nn.Module):
+    def __init__(self, groups):
+        super(ShuffleBlock, self).__init__()
+        self.groups = groups
+
+    def forward(self, x):
+        '''Channel shuffle: [N,C,H,W] -> [N,g,C/g,H,W] -> [N,C/g,g,H,w] -> [N,C,H,W]'''
+        N,C,H,W = x.size()
+        g = self.groups
+        return x.view(N,g,C//g,H,W).permute(0,2,1,3,4).contiguous().view(N,C,H,W)
+
 class LabelSmoothing(nn.Module):
     """
     NLL loss with label smoothing.
@@ -232,21 +243,22 @@ class LogConv2d(nn.Module):
         self.base = base
         self.max_exp = max_exp
         self.min_exp = max_exp - num_levels + 1
-        N = out_channels*in_channels*kernel_size*kernel_size
+        N = (out_channels//groups)*in_channels*kernel_size*kernel_size
         self._weight = nn.Parameter(torch.Tensor(N))
-        n = kernel_size * kernel_size * out_channels
+        n = kernel_size * kernel_size * (out_channels//groups)
         self._weight.data.normal_(0, math.sqrt(2. / n))
         self.bias = None
         self.register_buffer('_mask', torch.ones(N))
 
     def forward(self, x):
-        return F.conv2d(x, self.weight, bias=self.bias, stride=self.stride, padding=self.padding)
+        return F.conv2d(x, self.weight, bias=self.bias, stride=self.stride, padding=self.padding,
+                        groups=self.groups)
 
     @property
     def weight(self):
         w = self.mask * self._weight
         w = log_quantize.apply(w, self.base, self.min_exp, self.max_exp)
-        return w.view(self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
+        return w.view(self.out_channels, self.in_channels//self.groups, self.kernel_size, self.kernel_size)
     
     @property
     def masked_weight(self):
@@ -322,6 +334,7 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
                                num_levels=weight_levels, max_exp=max_exp))
 
         if not last:
+            layer.append(ShuffleBlock(groups=groups))
             if bn == 'float-bn':
                 layer.append(nn.BatchNorm2d(out_channels))
             elif bn == 'quant-bn':
@@ -329,7 +342,6 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
                                      delta=bn_delta, maxv=bn_maxv))
             layer.append(Quantize(delta, 0, maxv))
         else:
-            pass
             layer.append(Bias(out_channels, bn_delta, bn_maxv))
 
         layer = nn.Sequential(*layer)

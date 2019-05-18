@@ -330,11 +330,10 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
         else:
             layer.append(Shift(in_channels, 3))
 
-        layer.append(LogConv2d(in_channels, out_channels, 1, stride, 0, groups=groups,
-                               num_levels=weight_levels, max_exp=max_exp))
-
         if not last:
-            layer.append(ShuffleBlock(groups=groups))
+            layer.append(LogConv2d(in_channels, out_channels, 1, stride, 0, groups=groups,
+                                   num_levels=weight_levels, max_exp=max_exp))
+
             if bn == 'float-bn':
                 layer.append(nn.BatchNorm2d(out_channels))
             elif bn == 'quant-bn':
@@ -342,6 +341,7 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
                                      delta=bn_delta, maxv=bn_maxv))
             layer.append(Quantize(delta, 0, maxv))
         else:
+            layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
             layer.append(Bias(out_channels, bn_delta, bn_maxv))
 
         layer = nn.Sequential(*layer)
@@ -370,6 +370,8 @@ def make_float_layer(reshape_stride=1):
         if not last:
             layer.append(nn.BatchNorm2d(out_channels))
             layer.append(nn.ReLU6(inplace=True))
+        else:
+            layer.append(Bias(out_channels, 1e-8, 1e3))
 
         layer = nn.Sequential(*layer)
     

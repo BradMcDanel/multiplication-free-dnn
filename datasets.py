@@ -295,7 +295,7 @@ def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
                  cache_mul=16, in_memory=False, val_only=False, input_size=224):
     train_path = os.path.join(dataset_root, 'imagenet-msgpack', 'ILSVRC-train.bin')
     val_path = os.path.join(dataset_root, 'imagenet-msgpack', 'ILSVRC-val.bin')
-    kwargs = {'num_workers': 32, 'pin_memory': True} if is_cuda else {}
+    kwargs = {'num_workers': 24, 'pin_memory': True} if is_cuda else {}
     num_train = 1281167
     num_val = 50000
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -317,7 +317,7 @@ def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
                                     # lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2RGB),
                                     # transforms.ToPILImage(),
                                     msgpack_load,
-                                    transforms.RandomResizedCrop(input_size, scale=(0.2, 1.0)),
+                                    transforms.RandomResizedCrop(input_size, scale=(0.08, 1.0)),
                                     transforms.RandomHorizontalFlip(),
                                     transforms.ToTensor(),
                                     normalize,

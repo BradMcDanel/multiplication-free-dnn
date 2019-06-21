@@ -32,8 +32,10 @@ def train_model(wrapped_model, model, model_path, train_loader, test_loader, ini
         model.stats = {'train_loss': [], 'test_acc': [], 'test_loss': [],
                        'weight': [], 'lr': [], 'macs': [], 'efficiency': []}
         start_epoch = 1
+        best_acc = 0
     else:
         start_epoch = len(model.stats['test_loss'])
+        best_acc = max(model.stats['test_acc']).item()
 
     curr_weights, _ = util.num_nonzeros(model)
     if hasattr(model, 'packed_layer_size'):
@@ -43,24 +45,9 @@ def train_model(wrapped_model, model, model_path, train_loader, test_loader, ini
 
     # optimizer
     optimizer = optim.RMSprop(util.group_weight(model), lr=init_lr, momentum=0.9, alpha=0.9,
-                              weight_decay=4e-5, eps=1.0)
+                              weight_decay=0, eps=1.0)
     print("Optimizer:")
     print(optimizer)
-    best_acc = 0
-
-    prune_epoch = 0
-    max_prune_rate = 0.8
-    final_prune_epoch = int(0.9*args.epochs)
-    num_prune_epochs = 10
-    prune_rates = [max_prune_rate*(1 - (1 - (i / num_prune_epochs))**3)
-                   for i in range(num_prune_epochs)]
-    prune_rates[-1] = max_prune_rate
-    prune_epochs = np.linspace(0, final_prune_epoch, num_prune_epochs).astype('i').tolist()
-
-    prune_rate = 0.1
-    prune_total = 0.0
-    prune_cycle = 8
-    max_prune = 0.7
 
 
     # pruning stage
@@ -69,15 +56,6 @@ def train_model(wrapped_model, model, model_path, train_loader, test_loader, ini
         for g in optimizer.param_groups:     
             lr = g['lr']                    
             break        
-
-
-        if epoch % prune_cycle == 0 and prune_total < max_prune:
-            prune_total += prune_rate
-            print('Prune Total: {:2.2f}'.format(100.*prune_total))
-            util.prune(model, prune_total)
-            packing.pack_model(model, args.gamma)
-            macs = np.sum([x*y for x, y in model.packed_layer_size])
-            curr_weights, num_weights = util.num_nonzeros(model)
 
         train_loss = util.train(train_loader, wrapped_model, train_loss_f, optimizer, epoch-1, args)
         test_loss, test_acc = util.validate(test_loader, model, val_loss_f, epoch-1, args)
@@ -94,7 +72,7 @@ def train_model(wrapped_model, model, model_path, train_loader, test_loader, ini
 
         model.cpu()
         torch.save(model, model_path)
-        if test_acc > best_acc and prune_total >= max_prune:
+        if test_acc > best_acc:
             print('New best model found')
             torch.save(model, best_model_path)
             best_acc = test_acc
@@ -123,8 +101,6 @@ if __name__ == '__main__':
     parser.add_argument('--print-freq', default=100, type=int, help='printing frequency')
     parser.add_argument('--aug', default='+', help='data augmentation level (`-`, `+`)')
     parser.add_argument('--data-exp', type=int, default=-4, help='fixed point exp')
-    parser.add_argument('--gamma', type=float, default=1.75,
-                        help='column combine gamma parameter (default: 1.75)')
     parser.add_argument('--data-bins', type=int, default=127,
                         help='max activation bin (default: 127)')
     parser.add_argument('--weight-levels', type=int, default=4,
@@ -158,11 +134,7 @@ if __name__ == '__main__':
     if args.cuda:
         torch.cuda.manual_seed(args.seed)
 
-    # load or create model
-    if args.load_path == None:
-        model = util.build_model(args)
-    else:
-        model = torch.load(args.load_path)
+    model = util.build_model(args)
     model = model.cpu()
 
     # load dataset

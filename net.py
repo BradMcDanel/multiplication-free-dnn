@@ -10,7 +10,6 @@ from torch.distributions import categorical
 
 from itertools import product
 import util
-from bn import QuantBN
 
 quantize_cuda = load(
     'quantize_cuda', ['kernels/quantize_cuda.cpp', 'kernels/quantize_cuda_kernel.cu'], extra_cflags=['-O3'])
@@ -19,44 +18,33 @@ log_quantize_cuda = load(
 shift_cuda = load(
     'shift_cuda', ['kernels/shift_cuda.cpp', 'kernels/shift_cuda_kernel.cu'], extra_cflags=['-O3'])
 
-class ShuffleBlock(nn.Module):
-    def __init__(self, groups):
-        super(ShuffleBlock, self).__init__()
-        self.groups = groups
-
-    def forward(self, x):
-        '''Channel shuffle: [N,C,H,W] -> [N,g,C/g,H,W] -> [N,C/g,g,H,w] -> [N,C,H,W]'''
-        N,C,H,W = x.size()
-        g = self.groups
-        return x.view(N,g,C//g,H,W).permute(0,2,1,3,4).contiguous().view(N,C,H,W)
-
-class LabelSmoothing(nn.Module):
-    """
-    NLL loss with label smoothing.
-    """
-    def __init__(self, smoothing=0.0):
-        """
-        Constructor for the LabelSmoothing module.
-        :param smoothing: label smoothing factor
-        """
-        super(LabelSmoothing, self).__init__()
-        self.confidence = 1.0 - smoothing
-        self.smoothing = smoothing
-
-    def forward(self, x, target):
-        logprobs = torch.nn.functional.log_softmax(x, dim=-1)
-
-        nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
-        nll_loss = nll_loss.squeeze(1)
-        smooth_loss = -logprobs.mean(dim=-1)
-        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
-        return loss.mean()
 
 def _make_pair(x):
     if hasattr(x, '__len__'):
         return x
     else:
         return (x, x)
+
+
+
+def convert_bn(bn_layer, delta, maxv, sf_const=0.75):
+    data_exp = delta / sf_const
+    scale_bins = int(maxv / delta)
+    shift_bins = 2**12
+
+    mu = bn_layer.running_mean
+    sigma = torch.sqrt(bn_layer.running_var + bn_layer.eps)
+    beta = bn_layer.bias
+    gamma = bn_layer.weight
+
+    scale = gamma / sigma
+    shift = beta - (gamma * mu) / sigma
+
+    scale = util.find_quantize(scale, scale_bins, 1)
+    shift = util.find_quantize(shift, shift_bins, sf_const)
+
+    return FoldedBN(scale, shift)
+
 
 class log_quantize(torch.autograd.Function):
     @staticmethod
@@ -134,9 +122,8 @@ class Quantize(nn.Module):
         self.clampv = clampv
 
     def forward(self, x):
-        h = quantize.apply(x, self.delta, self.minv, self.maxv, self.clampv)
-        return h
-
+        return quantize.apply(x, self.delta, self.minv, self.maxv, self.clampv)
+    
     def extra_repr(self):
         return 'delta={delta}, minv={minv}, maxv={maxv}'.format(**self.__dict__)
 
@@ -204,6 +191,9 @@ class Conv2d(nn.Module):
         self._weight = nn.Parameter(torch.Tensor(N))
         self._weight.data.normal_(0, math.sqrt(2. / n))
 
+        # pytorch v0.4, seems to error if register_buffer is called on empty Tensor
+        self.register_buffer('_quant_idxs', torch.Tensor([0]).long())
+        self.register_buffer('_quant_values', torch.Tensor([0]))
         self.register_buffer('_mask', torch.ones(N))
 
     def forward(self, x):
@@ -211,6 +201,8 @@ class Conv2d(nn.Module):
                     
     @property
     def weight(self):
+        if self._quant_idxs.size()[0] > 1:
+            self._weight.data[self._quant_idxs] = self._quant_values
         w = self.mask*self._weight
         return w.view(self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
 
@@ -243,22 +235,21 @@ class LogConv2d(nn.Module):
         self.base = base
         self.max_exp = max_exp
         self.min_exp = max_exp - num_levels + 1
-        N = (out_channels//groups)*in_channels*kernel_size*kernel_size
+        N = out_channels*in_channels*kernel_size*kernel_size
         self._weight = nn.Parameter(torch.Tensor(N))
-        n = kernel_size * kernel_size * (out_channels//groups)
+        n = kernel_size * kernel_size * out_channels
         self._weight.data.normal_(0, math.sqrt(2. / n))
         self.bias = None
         self.register_buffer('_mask', torch.ones(N))
 
     def forward(self, x):
-        return F.conv2d(x, self.weight, bias=self.bias, stride=self.stride, padding=self.padding,
-                        groups=self.groups)
+        return F.conv2d(x, self.weight, bias=self.bias, stride=self.stride, padding=self.padding)
 
     @property
     def weight(self):
         w = self.mask * self._weight
         w = log_quantize.apply(w, self.base, self.min_exp, self.max_exp)
-        return w.view(self.out_channels, self.in_channels//self.groups, self.kernel_size, self.kernel_size)
+        return w.view(self.out_channels, self.in_channels, self.kernel_size, self.kernel_size)
     
     @property
     def masked_weight(self):
@@ -278,6 +269,104 @@ class LogConv2d(nn.Module):
         s += 'min_exp={min_exp}'
         return s.format(**self.__dict__)
 
+
+class MeanBatchNorm2d(torch.nn.Module):
+    def __init__(self, num_features, delta, maxv, eps=1e-3, momentum=0.9,
+                 affine=False, track_running_stats=True):
+        super(MeanBatchNorm2d, self).__init__()
+        self.num_features = num_features
+        self.delta = delta
+        self.maxv = maxv
+        self.eps = eps
+        self.momentum = momentum
+        self.track_running_stats = track_running_stats
+        self._shift = nn.Parameter(torch.zeros(num_features), requires_grad=affine)
+        self.register_buffer('running_mean', torch.zeros(num_features))
+
+    def forward(self, x):
+        if not self.training:
+            return (x + self.shift.view(1, -1, 1, 1))
+
+        mu = x.mean(0).mean(1).mean(1)
+        if self.track_running_stats is True:
+            self.running_mean.detach().mul_(self.momentum).add_(mu*(1 - self.momentum))
+        _shift = self.fold_shift(mu)
+        return (x + _shift.view(1, -1, 1, 1))
+    
+    def fold_shift(self, mu):
+        _shift = self._shift - mu
+        _shift = quantize.apply(_shift, self.delta, -self.maxv, self.maxv, -self.maxv)
+        return _shift
+    
+    @property
+    def shift(self):
+        return self.fold_shift(self.running_mean)
+
+    def extra_repr(self):
+        return '{num_features}, eps={eps}, momentum={momentum}, ' \
+               'track_running_stats={track_running_stats}'.format(**self.__dict__)
+
+class BatchNorm2d(torch.nn.Module):
+    def __init__(self, num_features, delta, maxv, max_exp, num_levels,
+                 base=2, eps=1e-3, momentum=0.9, track_running_stats=True):
+        super(BatchNorm2d, self).__init__()
+        self.num_features = num_features
+        self.delta = delta
+        self.maxv = maxv
+        self.max_exp = max_exp
+        self.min_exp = max_exp - num_levels + 1
+        self.base = base
+        self.eps = eps
+        self.momentum = momentum
+        self.track_running_stats = track_running_stats
+        self._shift = nn.Parameter(torch.zeros(num_features))
+        self.register_buffer('running_mean', torch.zeros(num_features))
+        self.register_buffer('running_std', torch.ones(num_features))
+
+    def forward(self, x):
+        self.running_std[self.running_std==0] = self.eps
+        if not self.training:
+            return (self.scale.view(1, -1, 1, 1) * x) + self.shift.view(1, -1, 1, 1)
+
+        y = x.transpose(0, 1).contiguous().view(x.size(1), -1)
+        mu = y.mean(dim=1)
+        sigma = y.std(dim=1)
+        sigma.data[sigma==0] = self.eps
+        if self.track_running_stats is True:
+            self.running_mean.detach().mul_(1-self.momentum).add_(self.momentum*mu)
+            self.running_std.detach().mul_(1-self.momentum).add_(self.momentum*sigma)
+
+        _shift = self.fold_shift(mu, sigma)
+        _scale = self.fold_scale(sigma)
+
+        return (_scale.view(1, -1, 1, 1) * x) + _shift.view(1, -1, 1, 1)
+    
+    def fold_scale(self, sigma):
+        _scale = log_quantize.apply(1 / sigma, self.base, self.min_exp, self.max_exp)
+        return _scale
+    
+    def fold_shift(self, mu, sigma):
+        _shift = self._shift + (-mu / sigma)
+        _shift = quantize.apply(_shift, self.delta, -self.maxv, self.maxv, -self.maxv)
+        return _shift
+    
+    @property
+    def scale(self):
+        return self.fold_scale(self.running_std)
+
+    @property
+    def shift(self):
+        return self.fold_shift(self.running_mean, self.running_std)
+
+class FoldedBN(nn.Module):
+    def __init__(self, scale, shift):
+        super(FoldedBN, self).__init__()
+        self.shift = nn.Parameter(shift)
+        self.scale = nn.Parameter(scale)
+    
+    def forward(self, x):
+        return self.scale.view(1, -1, 1, 1) * x + self.shift.view(1, -1, 1, 1)
+
 class Bias(nn.Module):
     def __init__(self, num_features, delta, maxv):
         super(Bias, self).__init__()
@@ -292,6 +381,21 @@ class Bias(nn.Module):
     def shift(self):
         return quantize.apply(self._shift, self.delta, -self.maxv, self.maxv, -self.maxv)
 
+class View(nn.Module):
+    def __init__(self, shape):
+        super(View, self).__init__()
+        self.shape = shape
+
+    def forward(self, x):
+        return x.view(self.shape)
+
+class Interpolate(nn.Module):
+    def __init__(self, size):
+        super(Interpolate, self).__init__()
+        self.size = size
+
+    def forward(self, x):
+        return F.interpolate(x, self.size)
 
 class CheckerboardReshape(nn.Module):
     def __init__(self, s):
@@ -305,21 +409,18 @@ class CheckerboardReshape(nn.Module):
         h = h.reshape(B, -1, W // self.s, H // self.s)
         return h
 
-def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_stride=1):
-    # quantization values
-    delta = 2**data_exp
-    maxv = data_bins * delta
-    max_exp = int(max_exp)
-    min_exp = int(max_exp - weight_levels + 1)
-    bn_min_exp = -8
-    bn_max_exp = 8
-    bn_delta = 2**(data_exp - 8)
-    bn_maxv = 2**16 * bn_delta
-
+def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, sf_const=0.75, reshape_stride=1):
     def quant_layer(in_channels, out_channels, stride, groups, layer_idx, num_layers):
         layer = []
         first = layer_idx == 0
         last = layer_idx == num_layers - 1
+        sec_last = layer_idx == num_layers - 2
+        delta = sf_const * 2**data_exp
+        maxv = data_bins * delta
+        bn_min = sf_const * 2**(data_exp - 7)
+        bn_max = 2**16 * bn_min
+        bn_max_exp = 5
+        bn_min_exp = -6
 
         if first:
             if reshape_stride != 1:
@@ -330,19 +431,27 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, reshape_st
         else:
             layer.append(Shift(in_channels, 3))
 
-        if not last:
+        if last:
+            layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
+            layer.append(Bias(out_channels, bn_min, bn_max))
+        else:
             layer.append(LogConv2d(in_channels, out_channels, 1, stride, 0, groups=groups,
                                    num_levels=weight_levels, max_exp=max_exp))
 
+        if not last:
             if bn == 'float-bn':
                 layer.append(nn.BatchNorm2d(out_channels))
+            elif bn == 'mean-bn':
+                layer.append(MeanBatchNorm2d(out_channels, bn_min, bn_max))
             elif bn == 'quant-bn':
-                layer.append(QuantBN(out_channels, log_min_exp=bn_min_exp, log_max_exp=bn_max_exp,
-                                     delta=bn_delta, maxv=bn_maxv))
+                layer.append(BatchNorm2d(out_channels, bn_min, bn_max, bn_max_exp, bn_max_exp - bn_min_exp))
+            elif bn == 'none':
+                layer.append(Bias(out_channels, bn_min, bn_max))
+
+        if sec_last:
+            layer.append(nn.ReLU(inplace=True))
+        elif not last:
             layer.append(Quantize(delta, 0, maxv))
-        else:
-            layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
-            layer.append(Bias(out_channels, bn_delta, bn_maxv))
 
         layer = nn.Sequential(*layer)
     
@@ -357,32 +466,31 @@ def make_float_layer(reshape_stride=1):
         first = layer_idx == 0
         last = layer_idx == num_layers - 1
 
-        if first:
-            if reshape_stride != 1:
-                layer.append(CheckerboardReshape(reshape_stride))
+        if first and reshape_stride != 1:
+            layer.append(CheckerboardReshape(reshape_stride))
         elif last:
-            layer.append(nn.AdaptiveAvgPool2d(1))
+            pass
         else:
             layer.append(Shift(in_channels, 3))
-
+        
         layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
 
         if not last:
             layer.append(nn.BatchNorm2d(out_channels))
-            layer.append(nn.ReLU6(inplace=True))
+            layer.append(nn.ReLU(inplace=True))
         else:
-            layer.append(Bias(out_channels, 1e-8, 1e3))
+            layer.append(nn.AdaptiveAvgPool2d(1))
 
         layer = nn.Sequential(*layer)
-    
+
         return layer
     
     return float_layer
 
 
-class ShiftNet(nn.Module):
+class ShiftMobile(nn.Module):
     def __init__(self, settings, layer, in_channels=3, n_class=1000, dropout=False):
-        super(ShiftNet, self).__init__()
+        super(ShiftMobile, self).__init__()
         input_channel = settings[0][0]
         layer_idx = 0
         num_layers = sum([n for c, n, s, g in settings]) + 2
@@ -405,7 +513,7 @@ class ShiftNet(nn.Module):
         if dropout:
             layers.append(nn.Dropout(0.5))
 
-        layers.append(layer(input_channel, n_class, 1, 1, layer_idx, num_layers))
+        layers.append(layer(input_channel, n_class, 1, 2, layer_idx, num_layers))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x):

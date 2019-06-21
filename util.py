@@ -28,11 +28,13 @@ def group_weight(module):
                 group_no_decay.append(m.bias)
         elif isinstance(m, net.LogConv2d) or isinstance(m, net.Conv2d):
             group_decay.append(m._weight)
-        elif isinstance(m, nn.BatchNorm2d) or isinstance(m, bn.QuantBN):
+        elif isinstance(m, nn.BatchNorm2d):
             if m.bias is not None:
                 group_no_decay.append(m.weight)
             if m.bias is not None:
                 group_no_decay.append(m.bias)
+        elif isinstance(m, net.BatchNorm2d):
+            group_no_decay.append(m._shift)
         elif isinstance(m, net.Bias):
             group_no_decay.append(m._shift)
 
@@ -54,14 +56,15 @@ def adjust_learning_rate(optimizer, epoch, args, batch=None,
             elif epoch >= args.epochs * 0.5:
                 lr *= decay_rate
         else:
-            """Following Label Refinery paper"""
-            if epoch < 140:
+            if epoch < 30:
                 lr = args.lr
-            elif epoch < 170:
+            elif epoch < 60:
                 lr = 0.1 * args.lr
             else:
                 lr = 0.01 * args.lr
             #lr = args.lr * (0.1 ** (epoch // 30))
+    elif method == 'many-multistep':
+        lr = args.lr * (0.97 ** (epoch // 3))
     else:
         assert False
     for param_group in optimizer.param_groups:
@@ -94,8 +97,8 @@ def build_model(args):
         layer = net.make_quant_layer(args.data_exp, args.data_bins, args.weight_levels,
                                      args.max_weight_exp, bn=args.bn_type,
                                      reshape_stride=args.reshape_stride)
-    model = net.ShiftNet(settings, layer=layer, in_channels=3*(args.reshape_stride**2),
-                         n_class=args.n_class, dropout=False)
+    model = net.ShiftMobile(settings, layer=layer, in_channels=3*(args.reshape_stride**2),
+                            n_class=args.n_class, dropout=args.dropout)
     
     if args.input_size != 224 and args.dataset == 'imagenet':
         model = nn.Sequential([net.Interpolate(args.input_size), model])
@@ -425,7 +428,7 @@ def track_running_stats(model, active):
 def get_batchnorm_layers(model):
     layers = []
     for layer in model.children():
-        if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, net.QuantBN):
+        if isinstance(layer, nn.BatchNorm2d) or isinstance(layer, net.BatchNorm2d):
             layers.append(layer)
         else:
             layers.extend(get_batchnorm_layers(layer))

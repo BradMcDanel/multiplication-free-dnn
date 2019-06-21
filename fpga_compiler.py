@@ -134,6 +134,14 @@ def gen_tiles(layer_weight, layer_mask, layer_bias, layer_scale, layer_shift,
         layer_weight = layer_weight * layer_scale.view(-1, 1, 1, 1)
 
     num_tiles = math.ceil(N / array_height)
+    # if permute_rows:
+        # layer_weight = layer_weight.view(-1, layer_groups, BRAM_WIDTH, C)
+        # layer_weight = layer_weight.transpose(1, 2).contiguous()
+        # layer_mask = layer_mask.view(-1, layer_groups, BRAM_WIDTH, C)
+        # layer_mask = layer_mask.transpose(1, 2).contiguous()
+        # layer_bias = layer_bias.view(-1, layer_groups, BRAM_WIDTH)
+        # layer_bias = layer_bias.transpose(1, 2).contiguous()
+    
     layer_weight = layer_weight.view(N, C)
     layer_mask = layer_mask.view(N, C)
     layer_bias = layer_bias.view(N)
@@ -194,11 +202,11 @@ parser.add_argument('--load-path', help='path to trained model')
 parser.add_argument('--output-folder', help='path to generate output')
 parser.add_argument('--dataset-root', default='datasets/', help='dataset root folder')
 parser.add_argument('--dataset', default='mnist', help='dataset name')
-parser.add_argument('--batch-size', type=int, default=1,
+parser.add_argument('--batch-size', type=int, default=512,
                     help='input batch size for training (default: 64)')
 parser.add_argument('--input-size', type=int, help='spatial width/height of input')
-parser.add_argument('--array-width', type=int, default=128, help='systolic array width')
-parser.add_argument('--array-height', type=int, default=64, help='systolic array height')
+parser.add_argument('--array-width', type=int, help='systolic array width')
+parser.add_argument('--array-height', type=int, help='systolic array height')
 args = parser.parse_args()
 args.cuda = True
 
@@ -228,7 +236,10 @@ maxv = model[0][0].maxv
 
 # input data
 for i in range(layer_idx, layer_idx + num_layers):
-    groups = model[i][1].groups
+    if i < len(model) - 1:
+        groups = model[i][1].groups
+    else:
+        groups = model[i][0].groups
 
     if i == 0:
         input_data = init_input
@@ -247,7 +258,10 @@ for i in range(layer_idx, layer_idx + num_layers):
 #shift data
 model.cuda()
 for i in range(layer_idx, layer_idx + num_layers):
-    groups = model[i][1].groups
+    if i < len(model) - 1:
+        groups = model[i][1].groups
+    else:
+        groups = model[i][0].groups
 
     if i == 0 or i == len(model) - 1:
         continue
@@ -266,7 +280,10 @@ model.cpu()
 
 # output data
 for i in range(layer_idx, layer_idx + num_layers):
-    groups = model[i][1].groups
+    if i < len(model) - 1:
+        groups = model[i][1].groups
+    else:
+        groups = model[i][0].groups
 
     if i == len(model) - 1:
         output_data = final_output.unsqueeze(2).unsqueeze(2)
@@ -283,7 +300,10 @@ for i in range(layer_idx, layer_idx + num_layers):
 # stride=2 output data
 model.cuda()
 for i in range(layer_idx, layer_idx + num_layers):
-    stride = model[i][1].stride[0]
+    if i < len(model) - 1:
+        stride = model[i][1].stride[0]
+    else:
+        stride = model[i][0].stride[0]
     
     if stride == 1:
         continue
@@ -316,10 +336,10 @@ for i in range(layer_idx, layer_idx + num_layers):
                                layer[1].min_exp, layer[1].max_exp, args.array_width,
                                args.array_height)
     elif i == len(model) - 1:
-        N, C, _, _ = layer[1].weight.shape
-        weight_bin = gen_tiles(layer[1].weight, layer[1].mask, torch.ones(N), None,
-                               torch.zeros(C, 2), layer[1].groups,
-                               layer[1].min_exp, layer[1].max_exp, args.array_width,
+        N, C, _, _ = layer[0].weight.shape
+        weight_bin = gen_tiles(layer[0].weight, layer[0].mask, layer[1].shift, None,
+                               torch.zeros(C, 2), layer[0].groups,
+                               layer[0].min_exp, layer[0].max_exp, args.array_width,
                                args.array_height, permute_rows=False)
     else:
         if hasattr(layer[2], 'scale'):

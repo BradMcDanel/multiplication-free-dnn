@@ -14,10 +14,6 @@ import io
 
 import numpy as np
 from random import shuffle
-from nvidia.dali.pipeline import Pipeline
-import nvidia.dali.ops as ops
-import nvidia.dali.types as types
-from nvidia.dali.plugin.pytorch import DALIClassificationIterator
 
 def imagenet_msgpack_loader(path, num_samples=1e10):
     samples = []
@@ -32,177 +28,6 @@ def imagenet_msgpack_loader(path, num_samples=1e10):
             break
     f.close()
     return samples
-
-class ExternalInputIterator(object):
-    def __init__(self, samples, batch_size):
-        self.samples = samples
-        self.batch_size = batch_size
-        shuffle(self.samples)
-
-    def __iter__(self):
-        self.i = 0
-        self.n = len(self.samples)
-        return self
-
-    def __next__(self):
-        batch = []
-        labels = []
-        for b in range(self.batch_size):
-            if b == self.n:
-                self.i = 0
-                break
-            x, label = self.samples[self.i]
-            #batch.append(np.frombuffer(pickle.loads(x), dtype=np.uint8))
-            batch.append(np.frombuffer(x, dtype=np.uint8))
-            labels.append(np.array([label], dtype=np.uint8))
-            self.i += 1
-        return (batch, labels)
-
-    next = __next__
-
-class ExternalSourcePipeline(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, iterator):
-        super(ExternalSourcePipeline, self).__init__(batch_size,
-                                      num_threads,
-                                      device_id,
-                                      seed=12)
-        self.iterator = iter(iterator)
-        self.input = ops.ExternalSource()
-        self.input_label = ops.ExternalSource()
-        self.decode = ops.nvJPEGDecoder(device = "mixed", output_type = types.RGB)
-        self.cast = ops.Cast(device = "gpu",
-                             dtype = types.INT32)
-        self.resize = ops.Resize(device = "gpu",
-                                 image_type = types.RGB,
-                                 interp_type = types.INTERP_LINEAR)
-        self.cmn = ops.CropMirrorNormalize(device = "gpu",
-                                            output_dtype = types.FLOAT,
-                                            crop = (227, 227),
-                                            image_type = types.RGB,
-                                            mean = [128., 128., 128.],
-                                            std = [1., 1., 1.])
-        self.uniform = ops.Uniform(range = (0.0, 1.0))
-        self.resize_rng = ops.Uniform(range = (256, 480))
-
-    def define_graph(self):
-        jpegs = self.input()
-        labels = self.input_label()
-        images = self.decode(jpegs)
-        images = self.resize(images, resize_shorter = self.resize_rng())
-        output = self.cmn(images, crop_pos_x = self.uniform(),
-                          crop_pos_y = self.uniform())
-        return (output, labels)
-
-    def iter_setup(self):
-        (images, labels) = self.iterator.next()
-        self.feed_input(self.jpegs, images)
-        self.feed_input(self.labels, labels)
-
-class HybridTrainPipe(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, crop, iterator, dali_cpu=False):
-        super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        self.iterator = iterator
-        self.input = ops.ExternalSource()
-        self.input_label = ops.ExternalSource()
-        # self.input = ops.FileReader(file_root=data_dir, shard_id=args.local_rank, num_shards=args.world_size, random_shuffle=True)
-        #let user decide which pipeline works him bets for RN version he runs
-        if dali_cpu:
-            dali_device = "cpu"
-            self.decode = ops.HostDecoderRandomCrop(device=dali_device, output_type=types.RGB,
-                                                    random_aspect_ratio=[0.8, 1.25],
-                                                    random_area=[0.1, 1.0],
-                                                    num_attempts=100)
-        else:
-            dali_device = "gpu"
-            # This padding sets the size of the internal nvJPEG buffers to be able to handle all images from full-sized ImageNet
-            # without additional reallocations
-            self.decode = ops.nvJPEGDecoderRandomCrop(device="mixed", output_type=types.RGB, device_memory_padding=211025920, host_memory_padding=140544512,
-                                                      random_aspect_ratio=[0.8, 1.25],
-                                                      random_area=[0.1, 1.0],
-                                                      num_attempts=100)
-        self.res = ops.Resize(device=dali_device, resize_x=crop, resize_y=crop, interp_type=types.INTERP_TRIANGULAR)
-        self.cmnp = ops.CropMirrorNormalize(device="gpu",
-                                            output_dtype=types.FLOAT,
-                                            output_layout=types.NCHW,
-                                            crop=(crop, crop),
-                                            image_type=types.RGB,
-                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
-                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
-        self.coin = ops.CoinFlip(probability=0.5)
-
-    def define_graph(self):
-        rng = self.coin()
-        self.jpegs = self.input()
-        self.labels = self.input_label()
-        # self.jpegs, self.labels = self.input(name="Reader")
-        images = self.decode(self.jpegs)
-        images = self.res(images)
-        output = self.cmnp(images.gpu(), mirror=rng)
-        return [output, self.labels]
-
-    def iter_setup(self):
-        (images, labels) = self.iterator.next()
-        self.feed_input(self.jpegs, images)
-        self.feed_input(self.labels, labels)
-
-
-class HybridValPipe(Pipeline):
-    def __init__(self, batch_size, num_threads, device_id, crop, size, iterator):
-        super(HybridValPipe, self).__init__(batch_size, num_threads, device_id, seed=12 + device_id)
-        self.iterator = iterator
-        self.input = ops.ExternalSource()
-        self.input_label = ops.ExternalSource()
-        self.decode = ops.nvJPEGDecoder(device="mixed", output_type=types.RGB)
-        self.res = ops.Resize(device="gpu", resize_shorter=size, interp_type=types.INTERP_TRIANGULAR)
-        self.cmnp = ops.CropMirrorNormalize(device="gpu",
-                                            output_dtype=types.FLOAT,
-                                            output_layout=types.NCHW,
-                                            crop=(crop, crop),
-                                            image_type=types.RGB,
-                                            mean=[0.485 * 255,0.456 * 255,0.406 * 255],
-                                            std=[0.229 * 255,0.224 * 255,0.225 * 255])
-
-    def define_graph(self):
-        self.jpegs = self.input()
-        self.labels = self.input_label()
-        images = self.decode(self.jpegs)
-        images = self.res(images)
-        output = self.cmnp(images)
-        return [output, self.labels]
- 
-
-    def iter_setup(self):
-        (images, labels) = self.iterator.next()
-        self.feed_input(self.jpegs, images)
-        self.feed_input(self.labels, labels)
-
-def get_imagenet_loaders(batch_size, num_workers=2, debug=False):
-    train_path = '/home/jovyan/harvard-heavy/datasets/imagenet-msgpack/ILSVRC-train.bin'
-    val_path = '/home/jovyan/harvard-heavy/datasets/imagenet-msgpack/ILSVRC-val.bin'
-
-    if debug:
-        train_samples = imagenet_msgpack_loader(train_path, 100000)
-    else:
-        train_samples = imagenet_msgpack_loader(train_path)
-
-    val_samples = imagenet_msgpack_loader(val_path)
-
-
-    train_iterator = ExternalInputIterator(train_samples, batch_size)
-    train_iterator = iter(train_iterator)
-    pipes = [HybridTrainPipe(batch_size, num_workers, i, 224, train_iterator) for i in range(8)]
-    for pipe in pipes:
-        pipe.build()
-    train_loader = DALIClassificationIterator(pipes, size=len(train_samples)) 
-
-    val_iterator = ExternalInputIterator(val_samples, batch_size)
-    val_iterator = iter(val_iterator)
-    pipes = [HybridValPipe(batch_size, num_workers, i, 224, 256, val_iterator) for i in range(8)]
-    for pipe in pipes:
-        pipe.build()
-    val_loader = DALIClassificationIterator(pipe, size=len(val_samples)) 
-
-    return train_samples, train_loader, val_samples, val_loader, pipes
 
 class InMemoryImageNet(Dataset):
     def __init__(self, path, num_samples, transforms):
@@ -301,21 +126,14 @@ def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])
     def msgpack_load(x):
-        # x = pickle.loads(x)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             x = Image.open(io.BytesIO(x)).convert('RGB')
-        # x[:, :, 0], x[:, :, 2] = x[:, :, 2], x[:, :, 0].copy()
-        # x = Image.fromarray(x)
         return x
 
     if not val_only:
         train = InMemoryImageNet(train_path, num_train,
                                 transforms=transforms.Compose([
-                                    # pickle.loads,
-                                    # lambda x: cv2.imdecode(x, cv2.IMREAD_COLOR),
-                                    # lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2RGB),
-                                    # transforms.ToPILImage(),
                                     msgpack_load,
                                     transforms.RandomResizedCrop(input_size, scale=(0.08, 1.0)),
                                     transforms.RandomHorizontalFlip(),
@@ -330,10 +148,6 @@ def get_imagenet(dataset_root, batch_size, is_cuda=True, num_workers=16,
 
     test = InMemoryImageNet(val_path, num_val,
                             transforms=transforms.Compose([
-                                # pickle.loads,
-                                # lambda x: cv2.imdecode(x, cv2.IMREAD_COLOR),
-                                # lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2RGB),
-                                # transforms.ToPILImage(),
                                 msgpack_load,
                                 transforms.Resize(int(input_size / 0.875)),
                                 transforms.CenterCrop(input_size),

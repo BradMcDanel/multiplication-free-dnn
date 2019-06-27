@@ -101,6 +101,8 @@ if __name__ == '__main__':
     parser.add_argument('--print-freq', default=100, type=int, help='printing frequency')
     parser.add_argument('--aug', default='+', help='data augmentation level (`-`, `+`)')
     parser.add_argument('--data-exp', type=int, default=-4, help='fixed point exp')
+    parser.add_argument('--gamma', type=float, default=1.75,
+                        help='column combine gamma parameter (default: 1.75)')
     parser.add_argument('--data-bins', type=int, default=127,
                         help='max activation bin (default: 127)')
     parser.add_argument('--weight-levels', type=int, default=4,

@@ -389,6 +389,15 @@ class View(nn.Module):
     def forward(self, x):
         return x.view(self.shape)
 
+class WrappedModel(nn.Module):
+    def __init__(self, model):
+        super(WrappedModel, self).__init__()
+        self.model = model
+
+    def forward(self, x):
+        return self.model(x)
+
+
 class Interpolate(nn.Module):
     def __init__(self, size):
         super(Interpolate, self).__init__()
@@ -432,7 +441,9 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, sf_const=0
             layer.append(Shift(in_channels, 3))
 
         if last:
-            layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
+            #layer.append(Conv2d(in_channels, out_channels, 1, stride, 0, groups=groups))
+            layer.append(LogConv2d(in_channels, out_channels, 1, stride, 0, groups=groups,
+                                   num_levels=weight_levels, max_exp=max_exp))
             layer.append(Bias(out_channels, bn_min, bn_max))
         else:
             layer.append(LogConv2d(in_channels, out_channels, 1, stride, 0, groups=groups,
@@ -449,7 +460,8 @@ def make_quant_layer(data_exp, data_bins, weight_levels, max_exp, bn, sf_const=0
                 layer.append(Bias(out_channels, bn_min, bn_max))
 
         if sec_last:
-            layer.append(nn.ReLU(inplace=True))
+            #layer.append(nn.ReLU(inplace=True))
+            layer.append(Quantize(delta, 0, maxv))
         elif not last:
             layer.append(Quantize(delta, 0, maxv))
 

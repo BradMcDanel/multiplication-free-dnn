@@ -2,9 +2,16 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.vscode*
+*.pyc
+*.npy
 
 # C extensions
 *.so
+
+# ml stuff
+figures/
+models/
 
 # Distribution / packaging
 .Python

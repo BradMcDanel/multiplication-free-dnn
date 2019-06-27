@@ -22,8 +22,8 @@ from model_refinery_wrapper import ModelRefineryWrapper
 import refinery_loss
 
 
-def train_model(wrapped_model, model, model_path, train_loader, test_loader, init_lr, epochs, args):
-    train_loss_f = refinery_loss.RefineryLoss()
+def train_model(wrapped_model, model, train_loss_f, model_path, train_loader,
+                test_loader, init_lr, epochs, args):
     val_loss_f = nn.CrossEntropyLoss()
     best_model_path = '.'.join(model_path.split('.')[:-1]) + '.best.pth'
 
@@ -172,10 +172,15 @@ if __name__ == '__main__':
     train_dataset, train_loader, test_dataset, test_loader = data
 
     # teacher model
-    teacher = ResNet50()
-    teacher.load_state_dict(torch.load(args.teacher_path))
-    teacher.cuda()
-    wrapped_model = ModelRefineryWrapper(model, teacher)
+    if args.teacher_path == None:
+        wrapped_model = net.WrappedModel(model)
+        train_loss_f = nn.CrossEntropyLoss()
+    else:
+        teacher = ResNet50()
+        teacher.load_state_dict(torch.load(args.teacher_path))
+        teacher.cuda()
+        wrapped_model = ModelRefineryWrapper(model, teacher)
+        train_loss_f = refinery_loss.RefineryLoss()
 
     if args.cuda:
         model = model.cuda()
@@ -184,4 +189,5 @@ if __name__ == '__main__':
     print(util.num_nonzeros(model))
     print('Target Nonzeros:', util.target_nonzeros(model))
 
-    train_model(wrapped_model, model, args.save_path, train_loader, test_loader, args.lr, args.epochs, args)
+    train_model(wrapped_model, model, train_loss_f, args.save_path, train_loader,
+                test_loader, args.lr, args.epochs, args)

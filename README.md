@@ -1,6 +1,8 @@
 # Full-stack Optimization for Accelerating CNNs Using Powers-ofTwo Weights with FPGA Validation
 
-This codebase requires PyTorch 1.0. Please refer to [https://github.com/BradMcDanel/multiplication-free-dnn/blob/master/net.py](net.py) for PyTorch layer definitions. Custom CUDA kernals for quantization (log and linear) and shift layers are in [https://github.com/BradMcDanel/multiplication-free-dnn/tree/master/kernels](kernels/). This codebase uses [https://github.com/hessamb/label-refinery](Label Refinery) for improved model performance.
+This codebase requires PyTorch 1.0. Please refer to [net.py](https://github.com/BradMcDanel/multiplication-free-dnn/blob/master/net.py) for PyTorch layer definitions. Custom CUDA kernals for quantization (log and linear) and shift layers are in [kernels/](https://github.com/BradMcDanel/multiplication-free-dnn/tree/master/kernels). This codebase uses [Label Refinery](https://github.com/hessamb/label-refinery) for improved model performance.
+
+We use a custom data loader which loads the entire ImageNet into memory (~200GB) before training (required due to network drives). This can be swapped out for the standard PyTorch dataloader and should lead to similar model performance.
 
 ## Quantized Powers-of-two training (smaller model ~1.5M weights)
 ```

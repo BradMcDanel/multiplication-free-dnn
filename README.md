@@ -1,14 +1,13 @@
-# Training Strategy and Example
-Training can be performed in up to 2 stages. However, we can omit the first stage if we are confident in the parameters for pruning (and do not wish to start from pretrained model). Both training scripts `train.py` and `train_prune.py` can be used with a pretrained model (using the `--load-path` flag) or start training a new model if `--load-path` is omitted. In the case of a new model, several parameters control the width/depth of the model and activation quantization (see Stage 1 arguments below).
+# Full-stack Optimization for Accelerating CNNs Using Powers-ofTwo Weights with FPGA Validation
 
+This codebase requires PyTorch 1.0. Please refer to [https://github.com/BradMcDanel/multiplication-free-dnn/blob/master/net.py](net.py) for PyTorch layer definitions. Custom CUDA kernals for quantization (log and linear) and shift layers are in [https://github.com/BradMcDanel/multiplication-free-dnn/tree/master/kernels](kernels/). This codebase uses [https://github.com/hessamb/label-refinery](Label Refinery) for improved model performance.
 
-### Trains model without weight pruning
+## Quantized Powers-of-two training (smaller model ~1.5M weights)
 ```
-python train.py --dataset-root /hdd1/datasets --dataset cifar10 --batch-size 256 --epochs 150 --lr 0.2 --aug ++ --save-path models/cifar10-quant.pth --filters 32 64 128 --layers 4 4 4 --strides 1 2 2 --groups 1 2 8 --delta 0.0625 --maxv 7.9375 --max-weight-exp 1 --weight-levels 8 --sparsity-lambda 0 --layer-type quant --n-class 10
-```
-
-### Trains model with weight pruning
-For pruning, the groups parameter determines how much a layer is pruned. If groups=8, then the layer will be reduced by a factor of 8.
-```
-python train_prune.py --dataset-root /hdd1/datasets --dataset cifar10 --batch-size 256 --epochs 150 --lr 0.2 --aug ++ --save-path models/cifar10-quant.pth --filters 32 64 128 --layers 4 4 4 --strides 1 2 2 --groups 1 2 8 --delta 0.0625 --maxv 7.9375 --max-weight-exp 1 --weight-levels 8 --sparsity-lambda 0 --layer-type quant --n-class 10
+python train.py --dataset-root <dataset folder> --dataset imagenet --batch-size 1024 \
+                --epochs 140 --lr-type cosine --lr 0.256 --aug + --save-path <save path> \
+                --teacher-path <pretrained resnet50 path> --filters 128 512 512 512 1024  \
+                --layers 4 4 4 4 1 --strides 1 2 2 2 1 --groups 2 8 8 8 8 --max-weight-exp 0 \
+                --weight-levels 8 --layer-type quant --bn-type quant-bn --n-class 1000 \
+                --input-size 224 --reshape-stride 4 --gamma 0.4 --in-memory
 ```

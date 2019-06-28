@@ -9,7 +9,6 @@ from torch.nn.parallel import data_parallel
 import torch.nn.functional as F
 from torch.autograd import Variable
 import net
-import bn
 import time
 import gc
 import os
